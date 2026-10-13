@@ -614,6 +614,158 @@ app.post('/api/v1/app/board-relay', needApp, async (req, res) => {
   }
 });
 
+// ============================================================================
+//  流程同步(服务器为权威 + App 本地缓存)
+//
+//  背景 / 为什么要这么设计
+//  ────────────────────────────────────────────────────────────────────────
+//  原来「流程」有三处真相,谁也不服谁:
+//    ① 板子的 spiffs   = 流程正文(权威)
+//    ② App 的 SharedPreferences = 流程状态(权威)
+//    ③ 服务器 board_flows = **只读备份**(只收不发)
+//  ⇒ 换手机就丢状态,换板子就丢流程,群控更无从谈起。
+//
+//  现在服务器是**权威**,App 和板子都是**缓存**:
+//    · App 改动 → 乐观地本地先生效 → 同时推服务器(带 baseVer)
+//    · 服务器版本变了 → App 启动时拉增量 → 写回本地和板子
+//    · 服务器够不到板子(内网)⇒ 由 App 中转,和点灯那条路一样
+//
+//  ⚠️ 冲突策略:**最后写入者赢(LWW)+ 服务器保留版本号**。
+//     不做自动合并 —— 自动合并是另一个量级的复杂度,
+//     而现在只有一两个人在用,冲突概率极低。
+//     真冲突了返回 409 + 服务器当前内容,让 App 决定。
+//
+//  ⚠️ owner 现在用 **deviceId** —— 因为 App 还没有登录(第 ⑦ 项)。
+//     等注册登录做完,owner 换成用户 id,历史流程不会有归属问题
+//     (owner 只是个字符串,改成 'user:123' 就行)。
+// ============================================================================
+
+/** 从请求里取 owner(现在=设备号) */
+function flowOwner(req) {
+  const o = String((req.body && req.body.deviceId) || req.query.deviceId || '').trim();
+  return o.slice(0, 64);
+}
+
+// ---- 拉增量:只返回比 since 新的 ----
+app.get('/api/v1/app/flows', needApp, async (req, res) => {
+  try {
+    const owner = flowOwner(req);
+    if (!owner) return json(res, 400, { ok: false, message: '缺少 deviceId' });
+    const since = Math.max(Number(req.query.since) || 0, 0);
+
+    const [mx] = await db.q(
+      'SELECT COALESCE(MAX(ver),0) AS v FROM flows WHERE owner = ?', [owner]);
+    const ver = mx ? Number(mx.v) : 0;
+
+    // since=0 表示"全量"(第一次装/清过数据)
+    const rows = since > 0
+      ? await db.q(`SELECT name, text, meta, ver, deleted, updated_at
+                    FROM flows WHERE owner = ? AND ver > ? ORDER BY ver`, [owner, since])
+      : await db.q(`SELECT name, text, meta, ver, deleted, updated_at
+                    FROM flows WHERE owner = ? AND deleted = 0 ORDER BY name`, [owner]);
+
+    json(res, 200, {
+      ok: true, ver, full: since === 0,
+      flows: rows.map(r => ({
+        name: r.name,
+        text: r.text,
+        meta: r.meta,                       // mysql2 会把 JSON 列自动 parse
+        ver: Number(r.ver),
+        deleted: !!r.deleted,
+        updatedAt: r.updated_at,
+      })),
+    });
+  } catch (e) {
+    console.error('[flows] 拉取出错', e.message);
+    json(res, 500, { ok: false, message: e.message });
+  }
+});
+
+// ---- 上传一条(新增/修改)----
+app.post('/api/v1/app/flows', needApp, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const owner = flowOwner(req);
+    const name = String(b.name || '').trim().slice(0, 64);
+    if (!owner) return json(res, 400, { ok: false, message: '缺少 deviceId' });
+    if (!name)  return json(res, 400, { ok: false, message: '缺少流程名' });
+
+    const baseVer = Math.max(Number(b.baseVer) || 0, 0);
+    const text = typeof b.text === 'string' ? b.text.slice(0, 60000) : null;
+    const meta = b.meta ? JSON.stringify(b.meta).slice(0, 20000) : null;
+
+    const cur = await db.one('SELECT ver, deleted FROM flows WHERE owner = ? AND name = ?',
+                             [owner, name]);
+
+    // ⚠️ 冲突检测:客户端说"我基于第 N 版改的",但服务器已经到 M>N 了
+    //    ⇒ 别人(或另一台设备)改过了。不静默覆盖,返回 409 让 App 决定。
+    if (cur && baseVer && Number(cur.ver) > baseVer) {
+      const sv = await db.one(
+        'SELECT name, text, meta, ver, deleted, updated_at FROM flows WHERE owner=? AND name=?',
+        [owner, name]);
+      return json(res, 409, {
+        ok: false, conflict: true,
+        message: `服务器上已是第 ${cur.ver} 版(你基于第 ${baseVer} 版)`,
+        server: sv,
+      });
+    }
+
+    if (cur) {
+      await db.run(
+        `UPDATE flows SET text = COALESCE(?, text), meta = COALESCE(?, meta),
+                          deleted = 0, ver = ver + 1
+         WHERE owner = ? AND name = ?`, [text, meta, owner, name]);
+    } else {
+      await db.run(
+        `INSERT INTO flows (owner, name, text, meta, ver, deleted)
+         VALUES (?,?,?,?,1,0)`, [owner, name, text, meta]);
+    }
+
+    const nv = await db.one('SELECT ver FROM flows WHERE owner = ? AND name = ?', [owner, name]);
+    // 顺手留一份历史 —— 和 flow_history 一个思路,但按 owner 存
+    await db.run(
+      `INSERT INTO flow_history (mac, name, text)
+       SELECT ?, ?, text FROM flows WHERE owner = ? AND name = ?`,
+      [owner, name, owner, name]).catch(() => {});
+
+    json(res, 200, { ok: true, name, ver: Number(nv ? nv.ver : 1) });
+  } catch (e) {
+    console.error('[flows] 上传出错', e.message);
+    json(res, 500, { ok: false, message: e.message });
+  }
+});
+
+// ---- 软删除 ----
+app.delete('/api/v1/app/flows/:name', needApp, async (req, res) => {
+  try {
+    const owner = flowOwner(req);
+    const name = String(req.params.name || '').slice(0, 64);
+    if (!owner) return json(res, 400, { ok: false, message: '缺少 deviceId' });
+    // ⚠️ 软删除而不是 DELETE —— 别的设备要能拉到"这条被删了"这个事实,
+    //    硬删的话增量同步永远不知道它曾经存在。
+    await db.run(
+      `INSERT INTO flows (owner, name, ver, deleted) VALUES (?,?,1,1)
+       ON DUPLICATE KEY UPDATE deleted = 1, ver = ver + 1`, [owner, name]);
+    const nv = await db.one('SELECT ver FROM flows WHERE owner=? AND name=?', [owner, name]);
+    json(res, 200, { ok: true, name, ver: Number(nv ? nv.ver : 1) });
+  } catch (e) {
+    json(res, 500, { ok: false, message: e.message });
+  }
+});
+
+// ---- 后台看:某个 owner 的所有流程 ----
+app.get('/api/admin/flows', needLogin, async (req, res) => {
+  const owner = String(req.query.owner || '').slice(0, 64);
+  const rows = owner
+    ? await db.q(`SELECT owner, name, LENGTH(text) AS size, ver, deleted, updated_at
+                  FROM flows WHERE owner = ? ORDER BY name`, [owner])
+    : await db.q(`SELECT owner, name, LENGTH(text) AS size, ver, deleted, updated_at
+                  FROM flows ORDER BY owner, name LIMIT 500`);
+  const owners = await db.q(
+    'SELECT owner, COUNT(*) AS n, MAX(updated_at) AS at FROM flows GROUP BY owner ORDER BY at DESC');
+  json(res, 200, { ok: true, flows: rows, owners });
+});
+
 app.post('/api/v1/app/schedule', needApp, async (req, res) => {
   try {
     const p = req.body || {};

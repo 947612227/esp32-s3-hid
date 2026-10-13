@@ -56,6 +56,7 @@
     { k: 'home',     i: '🏠', n: '主页' },
     { k: 'control',  i: '🎛', n: '控制中心' },
     { k: 'devices',  i: '📱', n: '设备管理' },
+    { k: 'flows',    i: '📄', n: '流程管理' },
     { k: 'users',    i: '👤', n: '用户管理' },
     { k: 'apps',     i: '📦', n: 'APP 管理' },
     { k: 'firmware', i: '💾', n: '固件管理' },
@@ -88,6 +89,9 @@
       const statsSummary = ref('');
       const events  = ref([]);
       const audit   = ref([]);
+      const flows   = ref([]);
+      const flowOwners = ref([]);
+      const flowFilter = ref('');
 
       // 分页状态(审计 / 事件)
       const pg = reactive({
@@ -167,6 +171,14 @@
       async function loadFw()   { fws.value  = (await api('/api/admin/firmware')).list || []; }
       async function loadUsers(){ users.value = (await api('/api/admin/users')).users || []; }
 
+      /** 流程管理:服务器上的权威流程(按 owner 分组) */
+      async function loadFlows() {
+        const d = await api('/api/admin/flows' + (flowFilter.value
+          ? '?owner=' + encodeURIComponent(flowFilter.value) : ''));
+        flows.value = d.flows || [];
+        flowOwners.value = d.owners || [];
+      }
+
       async function loadStats() {
         const d = await api('/api/admin/event-stats?days=30');
         stats.value = d.stats || [];
@@ -199,6 +211,7 @@
         if (p === 'users')    jobs.push(loadUsers());
         if (p === 'apps')     jobs.push(loadApk());
         if (p === 'firmware') jobs.push(loadFw());
+        if (p === 'flows')    jobs.push(loadFlows());
         if (p === 'logs')     jobs.push(loadAudit());
         if (p === 'stats')    jobs.push(loadStats(), loadEvents());
         return Promise.all(jobs.map(x => Promise.resolve(x).catch(e => console.error(e))));
@@ -394,9 +407,10 @@
         page, menus, curTitle, errMsg, clock, bootAt, ver, built, ME,
         summary, boards, phones, apks, fws, users, stats, statsSummary,
         events, audit, pg, apkForm, fwForm, newUser, dlg, flowDlg, polDlg, ledDlg, busy,
+        flows, flowOwners, flowFilter,
         // 方法
         go, loadAll, loadPage, loadBoards, loadPhones, loadApk, loadFw,
-        loadUsers, loadStats, loadEvents, loadAudit, loadSummary,
+        loadUsers, loadStats, loadEvents, loadAudit, loadSummary, loadFlows,
         fireLed, showBoard, showFlows, setPolicy, savePolicy, openLed,
         uploadApk, uploadFw, delFw,
         addUser, chpw, toggleUser, delUser,

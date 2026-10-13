@@ -803,6 +803,11 @@ public class FlowEditActivity extends Activity {
                 toast(Board.messageOf(body));
                 if (ok) {
                     flows.put(draft);
+                    // 顺手推给服务器(服务器是权威,详见 FlowSync 的注释)。
+                    // ⚠️ baseVer=0 = 盲写:编辑页手里只有"当前草稿",没有服务器版本号。
+                    //    真冲突时服务器**保留它自己的版本**,下一次 pull 会把
+                    //    服务器的内容拉回来 —— 不会静默丢数据。
+                    FlowSync.push(FlowEditActivity.this, n, content, draft, 0, null);
                     finish();
                 }
             }

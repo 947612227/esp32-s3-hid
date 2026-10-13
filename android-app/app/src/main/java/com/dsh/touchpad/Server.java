@@ -377,6 +377,43 @@ public class Server {
      * App 启动时调一次:上报 + 查更新。
      * 全部在后台线程,**不阻塞界面**。
      */
+    // ---------------------------------------------------------------- 流程同步
+    //
+    //  ⚠️ 为什么要有这一套:
+    //      原来流程有三处真相(板子正文 / App 状态 / 服务器只读备份),
+    //      换手机就丢状态,换板子就丢流程。
+    //      现在服务器是**权威**,这里负责"拉下来 / 推上去"。
+
+    /** 拉增量。since=0 表示全量(第一次装或清过数据) */
+    public static void fetchFlows(Context ctx, long since, Cb cb) {
+        final String d = deviceId(ctx);
+        req("/api/v1/app/flows?deviceId=" + android.net.Uri.encode(d) + "&since=" + since,
+            "GET", null, cb);
+    }
+
+    /** 推一条上去。baseVer=0 表示"我没见过服务器版本"(新建/导入),不报冲突 */
+    public static void pushFlow(Context ctx, String name, String text, String metaJson,
+                                long baseVer, Cb cb) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("deviceId", deviceId(ctx));
+            o.put("name", name);
+            o.put("text", text == null ? "" : text);
+            if (metaJson != null) o.put("meta", new JSONObject(metaJson));
+            o.put("baseVer", baseVer);
+            req("/api/v1/app/flows", "POST", o.toString(), cb);
+        } catch (Throwable e) {
+            if (cb != null) cb.done(false, String.valueOf(e.getMessage()));
+        }
+    }
+
+    /** 删一条(服务器是软删除,别的设备能拉到"被删了"这个事实) */
+    public static void deleteFlow(Context ctx, String name, Cb cb) {
+        final String d = deviceId(ctx);
+        req("/api/v1/app/flows/" + android.net.Uri.encode(name) + "?deviceId="
+            + android.net.Uri.encode(d), "DELETE", null, cb);
+    }
+
     public static void startupPing(Context ctx) {
         SharedPreferences sp = ctx.getSharedPreferences("board", Context.MODE_PRIVATE);
         long last = sp.getLong("lastReport", 0);

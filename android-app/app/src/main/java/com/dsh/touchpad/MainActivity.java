@@ -597,6 +597,7 @@ public class MainActivity extends Activity {
                                     toast(Ble.get().stateText);
                                     updateBleCtrlRow();
                         updateServerRow();
+                        maybeFlowSync();
                         // 每 30 秒最多探一次 —— 顺带把状态刷出来
                         // (别的服务器调用也会更新状态,所以这只是兜底)
                         if (System.currentTimeMillis() - lastPingAt > 30000) {
@@ -2476,6 +2477,32 @@ public class MainActivity extends Activity {
 
     /** 上次探服务器的时间(每 30 秒最多一次) */
     private long lastPingAt = 0;
+
+    /**
+     * 启动时从服务器拉一次流程(第 ⑥ 项:服务器是权威,App 是缓存)。
+     *
+     * ⚠️ 不做"板子在不在线"的前置判断 —— Board 没有这个接口,
+     *    而且板子没连上时拉下来的内容也需要写进本地元数据。
+     *    失败就**不置完成标志**,过一会儿重试(60 秒一次,不刷屏)。
+     */
+    private boolean flowSyncDone = false;
+    private long flowSyncTryAt = 0;
+    private void maybeFlowSync() {
+        if (flowSyncDone) return;
+        long now = System.currentTimeMillis();
+        if (now - flowSyncTryAt < 60000) return;
+        flowSyncTryAt = now;
+        FlowSync.pull(this, board, new FlowSync.Cb() {
+            @Override public void done(final boolean ok, final String info) {
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        boardLog(ok ? ("流程同步完成:" + info) : ("流程同步失败:" + info));
+                        if (ok) { flowSyncDone = true; loadScripts(); }
+                    }
+                });
+            }
+        });
+    }
 
     private void linkTick() {
         if (linkBusy) return;

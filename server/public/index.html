@@ -181,6 +181,8 @@
             <div class="s">板子列表、在线状态、流程、策略,以及<b>点亮 LED 对号</b></div></a>
           <a class="tile" @click="go('devices')"><div class="t">📱 设备管理</div>
             <div class="s">已上报的手机(型号 / Android / 已装 App)</div></a>
+          <a class="tile" @click="go('flows')"><div class="t">📄 流程管理</div>
+            <div class="s">服务器上的<b>权威流程</b>:正文 + 状态,App 启动时下载</div></a>
           <a class="tile" @click="go('users')"><div class="t">👤 用户管理</div>
             <div class="s">后台账号:角色、启用/停用、改密码</div></a>
           <a class="tile" @click="go('apps')"><div class="t">📦 APP 管理</div>
@@ -290,6 +292,47 @@
               <td><template v-if="p.apps">{{ p.apps.length }} 个</template>
                   <span v-else class="tag">未上报</span></td>
               <td>{{ ago(p.lastSeen) }}<br><span class="tag">{{ fmtTime(p.lastSeen) }}</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- ==================== 📄 流程管理 ==================== -->
+      <section v-show="page==='flows'">
+        <h2>📄 流程管理 <span class="muted">{{ flows.length }} 条(服务器是权威)</span></h2>
+        <div class="box" style="margin-bottom:14px">
+          <b>这里的流程 = 权威副本</b> ✅ App 启动时会拉增量写进本地和板子 ✅
+          <br>
+          <span class="muted">
+            板子上也有一份(执行用),App 里有一份(状态用)。
+            三者的关系:服务器定内容 → App 中转 → 板子执行。
+          </span>
+        </div>
+
+        <div class="row">
+          <label>按归属筛选</label>
+          <select v-model="flowFilter" @change="loadFlows()">
+            <option value="">全部</option>
+            <option v-for="o in flowOwners" :key="o.owner" :value="o.owner">
+              {{ o.owner }}({{ o.n }} 条)
+            </option>
+          </select>
+          <button @click="loadFlows()">🔄 刷新</button>
+        </div>
+
+        <table>
+          <thead><tr><th>归属</th><th>流程名</th><th>大小</th><th>版本</th>
+            <th>状态</th><th>最后修改</th></tr></thead>
+          <tbody>
+            <tr v-if="!flows.length"><td colspan="6" class="muted">还没有流程</td></tr>
+            <tr v-for="(f,i) in flows" :key="i">
+              <td><span class="tag">{{ f.owner }}</span></td>
+              <td><b>{{ f.name }}</b></td>
+              <td>{{ f.size ? (f.size + ' 字节') : '—' }}</td>
+              <td>v{{ f.ver }}</td>
+              <td><span class="pill" :class="f.deleted?'off':'on'">
+                {{ f.deleted ? '已删除' : '有效' }}</span></td>
+              <td>{{ fmtTime(f.updated_at) }}</td>
             </tr>
           </tbody>
         </table>
