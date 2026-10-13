@@ -9,6 +9,17 @@
 #    ③ 所以流程是:本机改代码 → 同步到服务器 → 服务器提交并推送
 #
 #  用法:./tools/sync-to-server.sh "这次改了什么"
+#
+#  ══════════════════════════════════════════════════════════════════════════
+#  ⚠️⚠️ **铁律:本机永远不直接推 GitHub**
+#
+#      这台开发机**禁止**推 GitHub(只允许推公司的 GitLab)。
+#      所以本脚本**只做"上传到服务器"**,推送这一步**在服务器上执行** ✅
+#      —— 服务器上没有这条限制。
+#
+#      本脚本运行前会检查:如果本机存在任何指向 github.com 的 remote,
+#      直接**报错退出**,避免误操作。
+#  ══════════════════════════════════════════════════════════════════════════
 # ============================================================================
 set -euo pipefail
 
@@ -18,6 +29,17 @@ REMOTE_DIR="/root/esp32-s3-hid"
 : "${SSHPASS:?请先 export SSHPASS=<服务器密码>}"
 
 cd "$(dirname "$0")/.."
+
+# ---- 铁律检查:本机不许有 github remote ----
+if git remote -v 2>/dev/null | grep -q "github.com"; then
+  echo "❌ 本机存在指向 github.com 的 remote:"
+  git remote -v | grep github.com | sed 's/^/     /'
+  echo "   本机**禁止**推 GitHub(只允许公司 GitLab)。"
+  echo "   推送请在服务器上做,或先 git remote remove <name>。"
+  exit 1
+fi
+echo "✅ 铁律检查:本机无 github remote(推送只在服务器上做)"
+
 echo "== 1/4 打包 =="
 # ⚠️ COPYFILE_DISABLE=1 关掉 macOS 的 xattr,否则 tar 会刷几百行
 #    "Ignoring unknown extended header keyword LIBARCHIVE.xattr..."
@@ -49,7 +71,7 @@ else
 fi
 EOF
 
-echo "== 4/4 推送 =="
+echo "== 4/4 推送(**在服务器上执行**,不是本机)=="
 sshpass -e ssh -q -o StrictHostKeyChecking=no "$HOST" \
   "cd $REMOTE_DIR && git push origin \$(git rev-parse --abbrev-ref HEAD) 2>&1 | tail -4"
 
