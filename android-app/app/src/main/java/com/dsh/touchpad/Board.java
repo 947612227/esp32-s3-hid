@@ -153,6 +153,7 @@ public class Board {
         if (p.equals("/api/led")) {
             // ⚠️ 参数在 query 里(query 变量已在上方拆好)
             String m = arg(query, "mode");
+            if (m.equalsIgnoreCase("test")) return "LED TEST";
             if (m.equalsIgnoreCase("off"))  return "LED OFF";
             if (m.equalsIgnoreCase("auto")) return "LED AUTO";
             if (query.isEmpty())            return "LED";        // 找板子
@@ -499,6 +500,7 @@ public class Board {
     public void ledBase(String what, Cb cb) {
         if (what == null || what.isEmpty() || "blink".equals(what)) { led(cb); return; }
         if ("off".equals(what))  { ledOff(cb);  return; }
+        if ("test".equals(what)) { ledTest(cb); return; }
         if ("auto".equals(what)) { ledAuto(cb); return; }
         String[] p = what.split(",");
         if (p.length == 3) {
@@ -513,6 +515,9 @@ public class Board {
 
     /** 关灯(手动保持熄灭,不会被状态色点亮) */
     public void ledOff(Cb cb) { get("/api/led?mode=off", cb); }
+
+    /** 🌈 四色自检:红→黄→绿→灭 各 1.5 秒(现场确认灯和引脚都对) */
+    public void ledTest(Cb cb) { get("/api/led?mode=test", cb); }
 
     /** 回到自动 —— 灯重新反映板子状态(未连接蓝 / 已连接绿 / 执行中黄) */
     public void ledAuto(Cb cb) { get("/api/led?mode=auto", cb); }

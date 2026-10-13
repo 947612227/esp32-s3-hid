@@ -2444,7 +2444,18 @@ public class MainActivity extends Activity {
             }
         }));
 
-        box.addView(Dialogs.value(this, "③ 指定颜色", C_ACC));
+        box.addView(Dialogs.value(this, "③ 现场确认灯好不好用", C_ACC));
+        box.addView(btnRow(null, new String[][]{{"🌈 四色自检(红→黄→绿→灭)", "test"}},
+                new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        ledSend("test", null);
+                        ledDismiss();
+                    }
+                }));
+        box.addView(hint("四个颜色各亮 1.5 秒。要是四个都能看到,说明灯和引脚都是对的;"
+                       + "要是只亮一个色/不亮,就是引脚或灯珠的问题。"));
+
+        box.addView(Dialogs.value(this, "④ 指定颜色", C_ACC));
         box.addView(btnRow(null, new String[][]{
                 {"🔴 红", "255,0,0"}, {"🟢 绿", "0,255,0"}, {"🔵 蓝", "0,0,255"}
         }, new View.OnClickListener() {

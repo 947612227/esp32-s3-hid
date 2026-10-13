@@ -299,7 +299,13 @@ static bool handleScriptCommand(const char *word, const char *args) {
       Serial.println(F("  LED r g b [ms]  设颜色(ms 省略=一直保持;不填=关灯)"));
       Serial.println(F("  LED AUTO        回到状态色(未连接蓝/已连接绿/执行中黄)"));
       Serial.println(F("  LED OFF         关灯"));
+      Serial.println(F("  LED TEST        四色自检(红→黄→绿→灭,各 1.5 秒)"));
       Serial.println(F("  BLINK           找板子(快-快-慢 + 绿常亮 60 秒)"));
+      return true;
+    }
+    if (!strcasecmp(args, "TEST")) {
+      Led::colorTest();
+      Serial.println(F("LED 四色自检已启动(红→黄→绿→灭,各 1.5 秒)"));
       return true;
     }
     if (!strcasecmp(args, "AUTO")) {

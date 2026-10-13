@@ -132,6 +132,10 @@ String bleHandleCommand(const String &rawReq) {
       Led::identify();
       return "{\"ok\":true,\"message\":\"已进入找板子模式(灯闪 60 秒)\"}";
     }
+    if (rest.equalsIgnoreCase("TEST")) {
+      Led::colorTest();
+      return "{\"ok\":true,\"message\":\"四色自检已启动:红→黄→绿→灭,各 1.5 秒\"}";
+    }
     if (rest.equalsIgnoreCase("AUTO")) {
       Led::autoMode();
       return "{\"ok\":true,\"message\":\"已回到自动(未连接蓝/已连接绿/执行中黄)\"}";

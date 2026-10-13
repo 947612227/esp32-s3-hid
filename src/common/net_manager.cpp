@@ -1172,6 +1172,12 @@ static void handleLed() {
     return;
   }
   const String mode = s_server.hasArg("mode") ? s_server.arg("mode") : String("");
+  if (mode.equalsIgnoreCase("test")) {
+    Led::colorTest();
+    s_server.send(200, "application/json",
+                  "{\"ok\":true,\"message\":\"四色自检已启动:红→黄→绿→灭,各 1.5 秒\"}");
+    return;
+  }
   if (mode.equalsIgnoreCase("auto")) {
     Led::autoMode();
     s_server.send(200, "application/json",

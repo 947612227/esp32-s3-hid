@@ -26,6 +26,10 @@ static int      s_state = 0;
  *      手动设过颜色之后必须**锁住**,直到显式 autoMode() 才交还给状态色。
  */
 static bool     s_manual = false;
+// 四色轮播自检:step 0..3 = 红/黄/绿/灭,4 = 结束
+static bool     s_test = false;
+static uint8_t  s_testStep = 0;
+static uint32_t s_testNextAt = 0;
 
 static void write(uint8_t r, uint8_t g, uint8_t b) {
   s_r = r; s_g = g; s_b = b;
@@ -102,6 +106,7 @@ bool identifying() { return s_identify; }
  *    想临时亮满色用 `LED r g b`(手动模式,见 set())。
  */
 void setState(int state) {
+  if (s_test) return;                   // 自检期间谁都不许改灯
   if (s_identify) return;               // 找板子期间别被盖掉
   // ⚠️ 手动常亮(holdMs==0)时,状态色**完全不许动它**
   if (s_manual && s_holdUntil == 0) return;
@@ -125,6 +130,16 @@ void setState(int state) {
 
 void setStateColor(int state) { setState(state); }
 
+void colorTest() {
+  s_test = true;
+  s_testStep = 0;
+  s_testNextAt = 0;          // 立刻亮第一个色
+  s_identify = false;
+  Serial.println(F("[led] 四色自检:红→黄→绿→灭"));
+}
+
+bool testing() { return s_test; }
+
 void finished() {
   Serial.println(F("[led] 执行结束 → 绿 5 秒"));
   // 绿 5 秒,然后 tick() 会自动回待机
@@ -137,6 +152,26 @@ void finished() {
 
 void tick() {
   uint32_t now = millis();
+
+  // ---- 四色轮播自检(优先级最高,期间别的都不许改灯)----
+  if (s_test) {
+    if (now >= s_testNextAt) {
+      switch (s_testStep) {
+        case 0: write(60, 0, 0);  Serial.println(F("[led] 自检 1/4 红"));   break;
+        case 1: write(60, 45, 0); Serial.println(F("[led] 自检 2/4 黄"));   break;
+        case 2: write(0, 60, 0);  Serial.println(F("[led] 自检 3/4 绿"));   break;
+        default: write(0, 0, 0);  Serial.println(F("[led] 自检 4/4 灭"));   break;
+      }
+      s_testStep++;
+      s_testNextAt = now + 1500;
+      if (s_testStep > 3) {
+        s_test = false;
+        s_state = -1;          // 让主循环下一轮重新报真实状态
+        Serial.println(F("[led] 自检结束,回到自动"));
+      }
+    }
+    return;                    // 自检期间不处理其它
+  }
   if (s_identify && s_identifyUntil && now > s_identifyUntil) {
     s_identify = false;
     s_state = -1;                        // 强制重画一次状态色
