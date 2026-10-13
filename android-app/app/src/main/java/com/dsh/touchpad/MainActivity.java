@@ -81,6 +81,9 @@ public class MainActivity extends Activity {
 
     /** 「☁️ 服务器」那一行 —— 让用户看到云端通没通 */
     private TextView serverRow;
+
+    /** 「💡 灯」那一行 —— 显示板子现在是什么颜色/什么模式 */
+    private TextView ledRow;
     /** 上次检测到的连接方式 + 上报过的值(变了才重报) */
     private Link.State lastLink = null;
     private String lastLinkSent = "";
@@ -568,6 +571,14 @@ public class MainActivity extends Activity {
         serverRow.setPadding(dp(2), dp(6), dp(2), dp(2));
         linkCard.addView(serverRow);
 
+        // 💡 灯的状态 —— 黄只亮 2~3 秒,靠盯板子根本看不清,直接显示出来
+        ledRow = new TextView(this);
+        ledRow.setTextSize(13);
+        ledRow.setTextColor(C_DIM);
+        ledRow.setPadding(dp(2), dp(6), dp(2), dp(2));
+        ledRow.setText("💡 灯:—");
+        linkCard.addView(ledRow);
+
         linkCard.addView(btnRow(null, new String[][]{
                 {"🔵 连接蓝牙控制", "conn"}, {"⚙ 控制方式", "mode"},
                 {"💡 点亮板子", "led"}, {"☁️ 测服务器", "srv"}
@@ -756,6 +767,12 @@ public class MainActivity extends Activity {
                     setPill(pillHid, hid ? "HID✓" : "HID✗", hid ? C_OK : C_ERR);
 
                     boolean running = Board.jbool(run, "running");
+                    // 💡 顺便把灯的状态显示出来
+                    {
+                        JSONObject _r = null;
+                        try { _r = new JSONObject(body); } catch (Throwable ignored) {}
+                        updateLedRow(_r == null ? null : _r.optString("led", ""));
+                    }
                     runningName = running ? Board.jstr(run, "lastName") : "";
                     // 页面推送的开关:跑的时候推,跑完再推 3 秒(收尾)
                     if (running) { runningNow = true; pagePushUntil = System.currentTimeMillis() + 3000; }
@@ -2479,6 +2496,15 @@ public class MainActivity extends Activity {
     private android.app.AlertDialog ledDlg;
     private void ledDismiss() { if (ledDlg != null) { ledDlg.dismiss(); ledDlg = null; } }
 
+    /** 刷新「💡 灯」那行(status 里带的 led 字段) */
+    private void updateLedRow(String ledMode) {
+        if (ledRow == null || ledMode == null || ledMode.isEmpty()) return;
+        ledRow.setText("💡 灯:" + ledMode);
+        ledRow.setTextColor(ledMode.contains("运行") ? C_WARN
+                          : ledMode.contains("待机") ? C_ERR
+                          : ledMode.contains("手动") ? C_ACC : C_DIM);
+    }
+
     /** 刷新「☁️ 服务器」那行 */
     private void updateServerRow() {
         if (serverRow == null) return;
@@ -3818,6 +3844,8 @@ public class MainActivity extends Activity {
                     JSONObject o = new JSONObject(body);
                     JSONObject r = o.optJSONObject("run");
                     boolean run = r != null && r.optBoolean("running", false);
+                    // 💡 把板子报的灯状态显示出来(不用再盯板子)
+                    updateLedRow(r == null ? null : r.optString("led", ""));
                     if (floatWin != null && floatWin.isShowing()) {
                         floatWin.setExecuting(run);
                     }

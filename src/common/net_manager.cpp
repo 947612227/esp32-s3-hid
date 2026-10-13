@@ -419,6 +419,11 @@ j += "\"heap\":" + String(ESP.getFreeHeap()) + ",";
 j += "\"uptime\":" + String(millis() / 1000) + ",";
 j += "\"run\":{";
 j += "\"running\":" + String(s_state.running ? "true" : "false") + ",";
+  // ⚠️ 把灯的当前状态也报出来。
+  //    坑:黄只亮流程那么久(2~3 秒)、绿 5 秒,用户在看手机就错过了,
+  //    然后一口咬定"灯没变"。报出来就能**在 App 上直接看到**,
+  //    不用再靠盯板子。
+  j += "\"led\":\"" + String(Led::modeName()) + "\",";
 j += "\"index\":" + String(s_state.index) + ",";
 j += "\"step\":" + String(s_state.step) + ",";
 j += "\"totalSteps\":" + String(s_state.totalSteps) + ",";
