@@ -1,0 +1,507 @@
+/**
+ * 触摸注入板 · 控制中心
+ * ══════════════════════════════════════════════════════════════════
+ *  三组接口:
+ *    1. /api/v1/board/*   ← 板子(ESP32)调用:心跳、查固件、下固件
+ *    2. /api/v1/app/*     ← 手机 App 调用:查 APK 更新、上报手机信息
+ *    3. /admin/*          ← 你自己(浏览器):看板、上传固件/APK、黑白名单
+ *
+ *  鉴权:
+ *    · 板子和 App 用 data/config.json 里的 token(首次启动自动生成)
+ *    · 管理后台用 HTTP Basic(用户名/密码同文件)
+ *
+ *  设计取舍:
+ *    · 存储用 JSON 文件而不是 SQLite —— 服务器没有 g++,原生模块编译不了
+ *    · 心跳历史写 JSONL,只留最近 N 条,防止无限增长
+ *    · 远程截图**只留接口口子**,暂不实现(AccessibilityService.takeScreenshot
+ *      要 Android 11+,MediaProjection 要常驻前台服务,代价太大)
+ * ══════════════════════════════════════════════════════════════════
+ */
+const express = require('express');
+const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
+const { JsonStore, appendJsonl, trimJsonl, DATA_DIR, ensureDir } = require('./src/store');
+const { encrypt, decrypt, newToken, safeEqual } = require('./src/crypto');
+
+const PORT = process.env.PORT || 80;
+const PUBLIC_DIR = path.join(__dirname, 'public');
+
+ensureDir(DATA_DIR);
+ensureDir(path.join(DATA_DIR, 'firmware'));
+ensureDir(path.join(DATA_DIR, 'apk'));
+
+// ---------------------------------------------------------------- 配置
+const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+let config;
+if (fs.existsSync(CONFIG_FILE)) {
+  config = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+} else {
+  config = {
+    boardToken: newToken('board'),
+    appToken: newToken('app'),
+    adminUser: 'admin',
+    adminPass: crypto.randomBytes(6).toString('hex'),
+    adminSession: newToken('sess'),
+    createdAt: Date.now(),
+  };
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 });
+  console.log('首次启动,已生成配置:', CONFIG_FILE);
+}
+
+// ---------------------------------------------------------------- 存储
+const boards = new JsonStore('boards', {});      // { mac: {...} }
+const phones = new JsonStore('phones', {});      // { deviceId: {...} }
+const firmware = new JsonStore('firmware', []);  // [ {...} ]
+const apks = new JsonStore('apk', []);           // [ {...} ]
+const policies = new JsonStore('policy', {});    // { mac: {mode, target} }
+
+const HEARTBEAT_KEEP = 2000;
+
+// ---------------------------------------------------------------- 工具
+
+/**
+ * 板子在线判定。
+ *
+ * ⚠️ 必须和板子的心跳间隔匹配:板子是**每 1 小时**心跳一次,
+ *    如果按"5 分钟内有心跳"算在线,那板子几乎永远显示离线(实测踩过)。
+ *    这里取 90 分钟 = 1 小时心跳 + 30 分钟容错(网络抖动/重启)。
+ */
+const HEARTBEAT_INTERVAL_MS = 60 * 60 * 1000;
+const ONLINE_MS = HEARTBEAT_INTERVAL_MS + 30 * 60 * 1000;
+
+function batteryOfBoard(b) {
+  const online = b.lastSeen && (Date.now() - b.lastSeen) < ONLINE_MS;
+  return Object.assign({}, b, { online });
+}
+
+/**
+ * 这台板子该不该拿到某个固件版本?
+ * 黑白名单 + 指定版本,三档优先:
+ *   ① policy.target 指定了具体固件 id → 只给那一个
+ *   ② policy.mode = 'deny'  → 不给更新(黑名单)
+ *   ③ policy.mode = 'allow' → 只在 channel 匹配时给(白名单)
+ *   ④ 没有策略 → 跟随 channel
+ */
+function firmwareForBoard(mac, boardFw, channel) {
+  const list = firmware.data
+    .filter(f => f.channel === (channel || 'stable'))
+    .sort((a, b) => b.createdAt - a.createdAt);
+  if (!list.length) return null;
+
+  const pol = policies.data[mac] || null;
+  if (pol) {
+    if (pol.mode === 'deny') return null;                 // 黑名单:永不升级
+    if (pol.target) {                                     // 指定版本
+      const t = firmware.data.find(f => String(f.id) === String(pol.target));
+      if (t && t.version !== boardFw) return t;
+      return null;
+    }
+  }
+  const latest = list[0];
+  if (latest.version === boardFw) return null;
+  return latest;
+}
+
+function sha256File(p) {
+  return crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+}
+
+function json(res, code, obj) {
+  res.status(code).type('application/json').send(JSON.stringify(obj));
+}
+
+// ---------------------------------------------------------------- 鉴权中间件
+
+function needBoard(req, res, next) {
+  const t = req.get('X-Token') || req.query.token || '';
+  if (safeEqual(t, config.boardToken)) return next();
+  return json(res, 401, { ok: false, message: '板子 token 不对' });
+}
+
+function needApp(req, res, next) {
+  const t = req.get('X-Token') || req.query.token || '';
+  if (safeEqual(t, config.appToken)) return next();
+  return json(res, 401, { ok: false, message: 'App token 不对' });
+}
+
+/**
+ * 管理端鉴权:Basic 认证 + **cookie 会话**。
+ *
+ * 为什么要 cookie:浏览器里 `<img>` / `fetch()` 这类子请求
+ * 不一定会带上 Basic 凭据(实测 headless 就带不上,
+ * 页面能打开但里面的数据全是"加载中")。
+ * 所以登录成功后下发一个 cookie,后续请求两种方式都认。
+ */
+function parseCookies(req) {
+  const out = {};
+  (req.get('Cookie') || '').split(';').forEach(kv => {
+    const i = kv.indexOf('=');
+    if (i > 0) out[kv.slice(0, i).trim()] = kv.slice(i + 1).trim();
+  });
+  return out;
+}
+
+function adminOk(req) {
+  // ① 页面里嵌入的会话令牌(最可靠:任何浏览器/headless 都带得上)
+  const hx = req.get('X-Admin-Session') || req.query.s || '';
+  if (hx && safeEqual(hx, config.adminSession)) return true;
+  // ② cookie
+  const c = parseCookies(req).tp_admin;
+  if (c && safeEqual(c, config.adminSession)) return true;
+  // ② Basic
+  const h = req.get('Authorization') || '';
+  if (h.startsWith('Basic ')) {
+    const raw = Buffer.from(h.slice(6), 'base64').toString('utf8');
+    const i = raw.indexOf(':');
+    if (i > 0) {
+      const u = raw.slice(0, i), p = raw.slice(i + 1);
+      if (safeEqual(u, config.adminUser) && safeEqual(p, config.adminPass)) return true;
+    }
+  }
+  return false;
+}
+
+function needAdmin(req, res, next) {
+  if (adminOk(req)) {
+    // 认证通过就续期 cookie,省得每次都要 Basic
+    res.set('Set-Cookie',
+      `tp_admin=${config.adminSession}; Path=/; Max-Age=604800; HttpOnly; SameSite=Lax`);
+    return next();
+  }
+  res.set('WWW-Authenticate', 'Basic realm="touchpad"');
+  return res.status(401).send('需要登录');
+}
+
+// ---------------------------------------------------------------- 上传
+const uploadFw = multer({ dest: path.join(DATA_DIR, 'firmware'), limits: { fileSize: 8 * 1024 * 1024 } });
+const uploadApk = multer({ dest: path.join(DATA_DIR, 'apk'), limits: { fileSize: 64 * 1024 * 1024 } });
+
+// ================================================================ App
+const app = express();
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+// 访问日志(不打 body,免得把 WiFi 密码写进日志)
+app.use((req, res, next) => {
+  const t0 = Date.now();
+  res.on('finish', () => {
+    console.log(`${new Date().toISOString()} ${req.method} ${req.originalUrl} ${res.statusCode} ${Date.now() - t0}ms`);
+  });
+  next();
+});
+
+// ================================================================ 板子接口
+
+app.get('/api/v1/board/health', (req, res) => json(res, 200, { ok: true, ts: Date.now() }));
+
+/**
+ * 心跳。板子上电 + 每 1 小时调一次。
+ * 响应里带"有没有新固件",板子把它存进自己的状态,App 再读出来提示用户。
+ */
+app.post('/api/v1/board/heartbeat', needBoard, (req, res) => {
+  const b = req.body || {};
+  const mac = String(b.mac || '').toLowerCase().trim();
+  if (!mac) return json(res, 400, { ok: false, message: '缺少 mac' });
+
+  const old = boards.data[mac] || {};
+  const rec = {
+    mac,
+    name: b.name || old.name || '',
+    fw: b.fw || old.fw || '',
+    ip: b.ip || '',
+    channel: b.channel || old.channel || 'stable',
+    heap: b.heap || 0,
+    uptime: b.uptime || 0,
+    hid: !!b.hid,
+    flows: b.flows || 0,
+    running: b.running || '',
+    next: b.next || null,
+    wifi: {
+      ssid: (b.wifi && b.wifi.ssid) || (old.wifi && old.wifi.ssid) || '',
+      rssi: (b.wifi && b.wifi.rssi) || 0,
+      channel: (b.wifi && b.wifi.channel) || 0,
+      // 密码只在传上来时更新,不覆盖成空
+      passEnc: (b.wifi && b.wifi.pass)
+        ? encrypt(b.wifi.pass)
+        : ((old.wifi && old.wifi.passEnc) || ''),
+    },
+    firstSeen: old.firstSeen || Date.now(),
+    lastSeen: Date.now(),
+    ipHistory: (old.ipHistory || []).concat(
+      (old.ip && old.ip !== b.ip) ? [{ ip: old.ip, at: old.lastSeen }] : []
+    ).slice(-10),
+  };
+  boards.data[mac] = rec;
+  boards.save();
+
+  appendJsonl('heartbeat', {
+    mac, ts: rec.lastSeen, heap: rec.heap, uptime: rec.uptime,
+    hid: rec.hid, flows: rec.flows, running: rec.running,
+  });
+  if (Math.random() < 0.02) trimJsonl('heartbeat', HEARTBEAT_KEEP);
+
+  const fw = firmwareForBoard(mac, rec.fw, rec.channel);
+  json(res, 200, {
+    ok: true,
+    serverTime: Date.now(),
+    fw: fw ? {
+      hasUpdate: true,
+      id: fw.id,
+      version: fw.version,
+      size: fw.size,
+      sha256: fw.sha256,
+      notes: fw.notes || '',
+      url: `http://${req.headers.host}/api/v1/board/firmware/download/${fw.id}`,
+    } : { hasUpdate: false },
+  });
+});
+
+app.get('/api/v1/board/firmware/download/:id', needBoard, (req, res) => {
+  const f = firmware.data.find(x => String(x.id) === String(req.params.id));
+  if (!f) return res.status(404).send('没有这个固件');
+  const p = path.join(DATA_DIR, 'firmware', f.file);
+  if (!fs.existsSync(p)) return res.status(410).send('固件文件已丢失');
+  res.type('application/octet-stream').sendFile(p);
+});
+
+// ================================================================ App 接口
+
+/** App 启动时查更新(客户端 15 秒超时,超时就算了) */
+app.get('/api/v1/app/version', (req, res) => {
+  const code = parseInt(req.query.code || '0', 10) || 0;
+  const list = apks.data.slice().sort((a, b) => b.versionCode - a.versionCode);
+  const latest = list[0];
+  if (!latest) return json(res, 200, { ok: true, hasUpdate: false });
+  json(res, 200, {
+    ok: true,
+    hasUpdate: latest.versionCode > code,
+    versionCode: latest.versionCode,
+    versionName: latest.versionName,
+    size: latest.size,
+    sha256: latest.sha256,
+    notes: latest.notes || '',
+    url: latest ? `http://${req.headers.host}/api/v1/app/download/${latest.id}` : '',
+  });
+});
+
+app.get('/api/v1/app/download/:id', (req, res) => {
+  const a = apks.data.find(x => String(x.id) === String(req.params.id));
+  if (!a) return res.status(404).send('没有这个 APK');
+  const p = path.join(DATA_DIR, 'apk', a.file);
+  if (!fs.existsSync(p)) return res.status(410).send('APK 文件已丢失');
+  res.type('application/vnd.android.package-archive').sendFile(p);
+});
+
+/** 手机信息上报 */
+app.post('/api/v1/app/phone', needApp, (req, res) => {
+  const p = req.body || {};
+  const id = String(p.deviceId || '').trim();
+  if (!id) return json(res, 400, { ok: false, message: '缺少 deviceId' });
+  const old = phones.data[id] || {};
+  phones.data[id] = Object.assign({}, old, {
+    deviceId: id,
+    name: p.name || old.name || '',
+    model: p.model || '',
+    android: p.android || '',
+    appVersion: p.appVersion || '',
+    wifi: p.wifi || old.wifi || null,
+    lastSeen: Date.now(),
+    firstSeen: old.firstSeen || Date.now(),
+  });
+  phones.save();
+  json(res, 200, { ok: true, serverTime: Date.now() });
+});
+
+/** 已安装 App 列表(Android 11+ 需要 QUERY_ALL_PACKAGES,我们已声明) */
+app.post('/api/v1/app/apps', needApp, (req, res) => {
+  const p = req.body || {};
+  const id = String(p.deviceId || '').trim();
+  if (!id) return json(res, 400, { ok: false, message: '缺少 deviceId' });
+  const rec = phones.data[id] || { deviceId: id };
+  rec.apps = Array.isArray(p.apps) ? p.apps.slice(0, 500) : [];
+  rec.appsAt = Date.now();
+  rec.lastSeen = Date.now();
+  phones.data[id] = rec;
+  phones.save();
+  json(res, 200, { ok: true, count: rec.apps.length });
+});
+
+/**
+ * 远程截图 —— **接口口子留好,暂不实现**。
+ *
+ * 为什么不做(已调研):
+ *   · AccessibilityService.takeScreenshot() 要 Android 11+,小米 8 是 Android 10
+ *   · MediaProjection 可以,但要**常驻前台服务 + 每次手动授权**,代价大
+ *
+ * 真要做的时候:App 端拉 `GET /api/v1/app/screenshot/request?deviceId=`
+ * 拿到 pending=true 就抓一帧,POST 到下面这个接口上传。
+ * 现在直接返回 501,让 App 明确知道"服务端没开这个功能"。
+ */
+app.get('/api/v1/app/screenshot/request', needApp, (req, res) => {
+  json(res, 200, { ok: true, enabled: false, pending: false,
+                   message: '服务端暂未启用远程截图' });
+});
+app.post('/api/v1/app/screenshot', needApp, (req, res) => {
+  json(res, 501, { ok: false, message: '远程截图暂未实现' });
+});
+
+// ================================================================ 管理接口
+
+app.get('/admin/api/boards', needAdmin, (req, res) => {
+  const list = Object.values(boards.data)
+    .map(batteryOfBoard)
+    .map(b => {
+      const c = Object.assign({}, b);
+      if (c.wifi) {
+        c.wifi = Object.assign({}, c.wifi);
+        c.wifi.hasPass = !!c.wifi.passEnc;
+        delete c.wifi.passEnc;          // 列表里不下发密文
+      }
+      return c;
+    })
+    .sort((a, b) => (b.online - a.online) || (b.lastSeen - a.lastSeen));
+  json(res, 200, { ok: true, boards: list });
+});
+
+/** 单台板子的详情,这个接口**才**返回解密后的 WiFi 密码 */
+app.get('/admin/api/board/:mac', needAdmin, (req, res) => {
+  const b = boards.data[req.params.mac.toLowerCase()];
+  if (!b) return json(res, 404, { ok: false, message: '没有这台板子' });
+  const o = batteryOfBoard(b);
+  o.wifi = Object.assign({}, o.wifi, { pass: decrypt(o.wifi.passEnc) });
+  delete o.wifi.passEnc;
+  json(res, 200, { ok: true, board: o, policy: policies.data[b.mac] || null });
+});
+
+/** 删掉一台板子(清理测试数据 / 换设备时用) */
+app.delete('/admin/api/board/:mac', needAdmin, (req, res) => {
+  const m = req.params.mac.toLowerCase();
+  if (!boards.data[m]) return json(res, 404, { ok: false, message: '没有这台板子' });
+  delete boards.data[m];
+  boards.save();
+  delete policies.data[m];
+  policies.save();
+  json(res, 200, { ok: true });
+});
+
+app.get('/admin/api/phones', needAdmin, (req, res) => {
+  const list = Object.values(phones.data).sort((a, b) => b.lastSeen - a.lastSeen);
+  json(res, 200, { ok: true, phones: list });
+});
+
+app.get('/admin/api/firmware', needAdmin, (req, res) => {
+  json(res, 200, { ok: true, list: firmware.data.slice().sort((a, b) => b.createdAt - a.createdAt) });
+});
+
+app.post('/admin/api/firmware', needAdmin, uploadFw.single('file'), (req, res) => {
+  if (!req.file) return json(res, 400, { ok: false, message: '没收到文件' });
+  const version = String(req.body.version || '').trim();
+  if (!version) { fs.unlinkSync(req.file.path); return json(res, 400, { ok: false, message: '要填版本号' }); }
+  const id = Date.now();
+  const name = `fw-${id}.bin`;
+  fs.renameSync(req.file.path, path.join(DATA_DIR, 'firmware', name));
+  const rec = {
+    id, version,
+    channel: req.body.channel === 'beta' ? 'beta' : 'stable',
+    file: name,
+    size: req.file.size,
+    sha256: sha256File(path.join(DATA_DIR, 'firmware', name)),
+    notes: String(req.body.notes || ''),
+    createdAt: Date.now(),
+  };
+  firmware.data.push(rec);
+  firmware.save();
+  json(res, 200, { ok: true, firmware: rec });
+});
+
+app.delete('/admin/api/firmware/:id', needAdmin, (req, res) => {
+  const i = firmware.data.findIndex(x => String(x.id) === String(req.params.id));
+  if (i < 0) return json(res, 404, { ok: false, message: '没有这个固件' });
+  const f = firmware.data.splice(i, 1)[0];
+  try { fs.unlinkSync(path.join(DATA_DIR, 'firmware', f.file)); } catch (_) {}
+  firmware.save();
+  json(res, 200, { ok: true });
+});
+
+app.get('/admin/api/apk', needAdmin, (req, res) => {
+  json(res, 200, { ok: true, list: apks.data.slice().sort((a, b) => b.versionCode - a.versionCode) });
+});
+
+app.post('/admin/api/apk', needAdmin, uploadApk.single('file'), (req, res) => {
+  if (!req.file) return json(res, 400, { ok: false, message: '没收到文件' });
+  const code = parseInt(req.body.versionCode || '0', 10);
+  if (!code) { fs.unlinkSync(req.file.path); return json(res, 400, { ok: false, message: '要填 versionCode' }); }
+  const id = Date.now();
+  const name = `touchpad-${code}.apk`;
+  fs.renameSync(req.file.path, path.join(DATA_DIR, 'apk', name));
+  const rec = {
+    id, versionCode: code,
+    versionName: String(req.body.versionName || String(code)),
+    file: name,
+    size: req.file.size,
+    sha256: sha256File(path.join(DATA_DIR, 'apk', name)),
+    notes: String(req.body.notes || ''),
+    createdAt: Date.now(),
+  };
+  apks.data.push(rec);
+  apks.save();
+  json(res, 200, { ok: true, apk: rec });
+});
+
+app.post('/admin/api/policy', needAdmin, (req, res) => {
+  const { mac, mode, target } = req.body || {};
+  if (!mac) return json(res, 400, { ok: false, message: '缺少 mac' });
+  const m = String(mac).toLowerCase();
+  if (!mode || mode === 'none') delete policies.data[m];
+  else policies.data[m] = { mode, target: target || null, at: Date.now() };
+  policies.save();
+  json(res, 200, { ok: true, policy: policies.data[m] || null });
+});
+
+/** 看板要用的汇总 */
+app.get('/admin/api/summary', needAdmin, (req, res) => {
+  const bs = Object.values(boards.data).map(batteryOfBoard);
+  json(res, 200, {
+    ok: true,
+    boards: bs.length,
+    online: bs.filter(b => b.online).length,
+    phones: Object.keys(phones.data).length,
+    firmware: firmware.data.length,
+    apk: apks.data.length,
+    serverTime: Date.now(),
+  });
+});
+
+// ================================================================ 静态 & 看板
+/**
+ * 看板 HTML 是**动态生成**的,不是静态文件 ——
+ * 因为要把 adminSession 嵌进去。
+ *
+ * 为什么要嵌:浏览器对 `fetch()` 不一定带 Basic 凭据,
+ * cookie 在部分环境(headless / 隐私模式)也不稳。
+ * 直接把令牌写进页面最可靠,而且这个页面**只有认证过的人能拿到**,
+ * 不存在把令牌泄露给未授权者的风险。
+ */
+app.get('/admin/', needAdmin, (req, res) => {
+  let html = fs.readFileSync(path.join(PUBLIC_DIR, 'index.html'), 'utf8');
+  html = html.replace('__ADMIN_SESSION__', config.adminSession);
+  res.type('text/html').send(html);
+});
+app.get('/admin', needAdmin, (req, res) => res.redirect('/admin/'));
+app.use('/admin/static', needAdmin, express.static(PUBLIC_DIR));
+
+// 根路径也指向看板(方便直接浏览器打开 IP)
+app.get('/', (req, res) => res.redirect('/admin/'));
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log('════════════════════════════════════════════');
+  console.log('  触摸注入板 · 控制中心已启动');
+  console.log('  监听端口 : ' + PORT);
+  console.log('  管理后台 : http://<本机IP>/admin/');
+  console.log('  管理员   : ' + config.adminUser + ' / ' + config.adminPass);
+  console.log('  数据目录 : ' + DATA_DIR);
+  console.log('════════════════════════════════════════════');
+});

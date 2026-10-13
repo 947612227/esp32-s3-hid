@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">触摸注入板</string>
+    <!-- 无障碍服务在系统设置里显示给用户看的说明。
+         必须写清楚"只读页面信息",用户才敢开。 -->
+    <string name="page_watcher_desc">只看不点:读取当前页面的名称和文字,用于在悬浮窗和日志里显示"现在在哪个页面",方便排查流程为什么点空。本服务不会代替你点击或输入任何内容。</string>
+</resources>

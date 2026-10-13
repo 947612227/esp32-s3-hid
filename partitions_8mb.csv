@@ -1,0 +1,20 @@
+# ESP32-S3 分区表:双 app 槽(支持 OTA)+ 脚本文件系统
+#
+# 布局(8MB Flash):
+#   nvs       20KB  @ 0x9000    配网信息、用户参数
+#   otadata    8KB  @ 0xE000    OTA 状态(记录当前该从哪个 app 槽启动)
+#   app0       3MB  @ 0x10000   OTA 槽 0
+#   app1       3MB  @ 0x310000  OTA 槽 1   ← 新增,OTA 需要两个槽
+#   spiffs     1MB  @ 0x610000  LittleFS(脚本存储)
+#   coredump  64KB  @ 0x710000  崩溃转储
+#
+# ⚠️ spiffs 偏移从 0x310000 变成 0x610000 —— 改分区表会**清空脚本**,
+#    升级前务必先备份(用 /api/scripts + /api/script?index=N 读出来),刷完再写回。
+#
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x5000,
+otadata,    data, ota,      0xE000,   0x2000,
+app0,       app,  ota_0,    0x10000,  0x300000,
+app1,       app,  ota_1,    0x310000, 0x300000,
+spiffs,     data, spiffs,   0x610000, 0x100000,
+coredump,   data, coredump, 0x710000, 0x10000,

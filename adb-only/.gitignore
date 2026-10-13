@@ -1,0 +1,4 @@
+# 运行时产物
+shots/
+__pycache__/
+*.pyc

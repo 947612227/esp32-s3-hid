@@ -1,0 +1,20 @@
+[Unit]
+Description=TouchPad Control Center (board/phone info + OTA + APK)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/touchpad-server
+ExecStart=/usr/bin/node index.js
+Restart=always
+RestartSec=5
+# CentOS 7 的 systemd 太老,不支持 append: 前缀,直接用 journal
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=touchpad-server
+# 只让服务写自己的目录,降低被攻破后的影响面
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

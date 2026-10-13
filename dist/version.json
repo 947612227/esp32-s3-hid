@@ -1,0 +1,15 @@
+{
+  "version": "1.2.0",
+  "builtAt": "2026-10-12 16:21:01",
+  "notes": "\u65b0\u677f\u5b50\u70e7\u5f55\u5305:BLE/USB/\u81ea\u68c0\u4e09\u4e2a\u56fa\u4ef6 + \u4e00\u952e\u70e7\u5f55\u811a\u672c",
+  "files": [
+    {"name": "touchpad-ble-full.bin", "label": "蓝牙版(推荐)", "size": 1332048},
+    {"name": "touchpad-usb-full.bin", "label": "USB 版", "size": 1151760},
+    {"name": "touchpad-usb_touchtest-full.bin", "label": "自检版(开机自动点四角验证坐标)", "size": 1152016}
+  ],
+  "scripts": [
+    {"name": "flash-windows.bat", "label": "Windows 一键烧录"},
+    {"name": "flash-mac-linux.sh", "label": "Mac / Linux 一键烧录"},
+    {"name": "README.txt", "label": "烧录说明"}
+  ]
+}

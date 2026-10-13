@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          xmlns:tools="http://schemas.android.com/tools"
+    package="com.dsh.touchpad"
+    android:versionCode="15"
+    android:versionName="3.3">
+
+    <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="35" />
+
+    <!-- 板子走局域网 HTTP,需要联网权限 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- ⚠️ Android 12(API 31)起,读**已配对蓝牙设备**需要 BLUETOOTH_CONNECT
+         运行时权限 —— 没有就抛 SecurityException。
+         我们需要它来:① 从蓝牙设备名认出板子 ② 拿板子蓝牙 MAC 推 WiFi MAC
+         (板子 WiFi 不通时,靠这个才能把"连接方式"报给服务器)
+         老系统用下面两条(BLUETOOTH/BLUETOOTH_ADMIN),所以加 maxSdkVersion -->
+    <uses-permission android:name="android.permission.BLUETOOTH"
+                     android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
+                     android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- 扫描要单独一条(Android 12+)。
+         ⚠️ neverForLocation:声明"扫描不是为了定位",
+            这样就不必再要 ACCESS_FINE_LOCATION 了 -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+                     android:usesPermissionFlags="neverForLocation"
+                     tools:targetApi="s" />
+
+    <!-- 读取已安装应用列表:用于让用户选择流程要操作的目标 App。
+         Android 11+ 默认看不到其他应用,必须声明这个权限(自用 sideload,
+         若上架 Google Play 会被限制,本 App 不打算上架)。 -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+    <!-- 悬浮窗:用于在使用其他 App 时也能看到运行日志与状态 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- ⚠️⚠️ Android 14(API 34)起:服务声明了 foregroundServiceType
+         就**必须**声明对应的权限,否则 startForeground() 抛 SecurityException
+         —— App 直接崩。
+         清单里 KeepAliveService 是 type=dataSync,所以必须加这一条。
+         (实测:小米 Android 10 上碰不到;三星 Android 16 上必崩) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Android 13+ 通知权限:前台服务的常驻通知需要它,
+         没有也能跑,但通知不显示(就用不了"点通知回 App") -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- 执行流程期间把"息屏时间"临时改成永不(结束后改回去)。
+         手机设置界面里息屏最大只到分钟级,没有"永不",只能走系统设置。
+         属于特殊权限,要在系统设置里手动授权。 -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+
+    <application
+        android:label="触摸注入板"
+        android:icon="@mipmap/ic_launcher"
+        android:theme="@style/AppTheme"
+        android:usesCleartextTraffic="true"
+        android:networkSecurityConfig="@xml/network_security_config">
+
+        <activity
+            android:name=".MainActivity"
+            android:label="触摸注入板"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".AppListActivity"
+            android:label="选择目标 App"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
+            android:name=".FlowEditActivity"
+            android:label="编辑流程"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
+            android:name=".ScheduleActivity"
+            android:label="定时设置"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
+            android:name=".CmdPickerActivity"
+            android:label="指令库"
+            android:exported="false" />
+
+        <activity
+            android:name=".CmdParamActivity"
+            android:label="指令参数"
+            android:exported="false" />
+
+        <!-- 页面识别:只看不点。
+             用户要在 系统设置 → 无障碍 里手动开启,App 无法自动开。 -->
+        <service
+            android:name=".PageWatcher"
+            android:exported="true"
+            android:label="触摸注入板 · 页面识别"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/page_watcher" />
+        </service>
+
+        <!-- 后台常驻服务:跑流程/开页面识别期间用前台服务保住进程。
+             没有它的话,切到目标 App 后 MIUI 会杀掉我们,
+             页面识别停止 → waitfor 永远超时。 -->
+        <service
+            android:name=".KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- 仅用于开发自测:通过 adb 广播验证网络层(不影响正常使用) -->
+        <receiver
+            android:name=".DebugReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.dsh.touchpad.DEBUG" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

@@ -1,0 +1,15 @@
+{
+  "name": "touchpad-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "触摸注入板控制中心:板子/手机信息收集 + 固件 OTA 分发 + APK 分发",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "mysql2": "^3.11.0"
+  }
+}

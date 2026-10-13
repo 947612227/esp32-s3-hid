@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  页面识别服务的配置。
+
+  ⚠️ 这里只申请**读窗口内容**的能力,不申请任何"代替用户操作"的能力:
+     · canRetrieveWindowContent = 读当前页面的控件树
+     · 没有 canPerformGestures / 没有监听点击内容
+  目的单一:知道"现在在哪个页面",用于日志和排障。
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/page_watcher_desc"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
+    android:canRetrieveWindowContent="true"
+    android:notificationTimeout="300"
+    android:settingsActivity="com.dsh.touchpad.MainActivity" />
