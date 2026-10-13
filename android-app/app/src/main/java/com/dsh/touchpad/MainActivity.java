@@ -1478,6 +1478,7 @@ public class MainActivity extends Activity {
                 new Dialogs.OnOk() {
                     @Override public void onOk() {
                         h[0].dismiss();
+                        selfStopped = false;     // 复位:马上要 launch,等它变 true
                         launchSelectedApp();     // 只启动,不执行
                     }
                 });
@@ -1490,36 +1491,50 @@ public class MainActivity extends Activity {
      * 固定等 1.2 秒时还在开屏广告,流程第一步就点偏了。
      * 轮询 + 缓冲比拍一个固定值可靠。
      */
+    /**
+     * 启动目标 App 后,等它真正到前台,再执行流程。
+     *
+     * ⚠️⚠️ 这里踩过一个**大坑**(用户实测:"点运行要等 30 秒才动"):
+     *
+     *   老实现用 `ActivityManager.getRunningTasks(1)` 判断目标 App 是否在前台。
+     *   但 **从 Android 5 (API 21) 起这个接口就被限制了** ——
+     *   它**只返回调用者自己的 task**。所以在 Android 16 上:
+     *       ts.get(0).topActivity == 我们自己的 MainActivity
+     *   永远不等于目标 App 的包名 ⇒ `fg` **永远是 false**
+     *   ⇒ 每 500ms 轮询一次,一直轮询到 60 次
+     *   ⇒ **死等满 30 秒**,才走"等超时,仍然开始执行"分支
+     *   ⇒ 用户看到的就是"点了运行,等 30 秒才动"
+     *
+     *   修法:不去猜别的 App 在不在前台(权限/限制太麻烦),
+     *   改成判断**我们自己有没有退到后台** ——
+     *   我们主动 launch 了别的 App,系统一定会把我们的 Activity 停掉,
+     *   `onStop()` 可靠、无需任何权限、所有 Android 版本行为一致。
+     *   自己退到后台 ⇒ 目标 App 已经起来了 ⇒ 再给一段渲染时间就执行。
+     */
     private void waitAppForegroundThenExec(final String flowName, final int idx, int tries) {
-        final String pkg = selectedAppPkg;
-        if (tries == 0) toast("等 App 到前台…");
-        if (tries > 60) {                    // 最多等 30 秒
-            toast("等超时,仍然开始执行");
-            exec(idx, 1, 0);
-            return;
-        }
-        boolean fg = false;
-        try {
-            android.app.ActivityManager am = (android.app.ActivityManager)
-                    getSystemService(ACTIVITY_SERVICE);
-            if (am != null) {
-                java.util.List<android.app.ActivityManager.RunningTaskInfo> ts =
-                        am.getRunningTasks(1);
-                if (ts != null && !ts.isEmpty() && ts.get(0).topActivity != null) {
-                    fg = pkg != null && pkg.equals(ts.get(0).topActivity.getPackageName());
-                }
-            }
-        } catch (Throwable ignored) {}
-        if (!fg) {
+        // ① 先等**自己**退到后台(最多 8 秒)
+        if (!selfStopped && tries < 16) {
+            if (tries == 0) toast("等目标 App 起来…");
             ui.postDelayed(new Runnable() {
                 @Override public void run() { waitAppForegroundThenExec(flowName, idx, tries + 1); }
             }, 500);
             return;
         }
-        // 到前台了,再给页面渲染/广告 2.5 秒
+        // ② 自己已经退到后台了,再给目标 App 一段渲染/开屏广告的时间
+        //    ⚠️ 这个值可以调:大麦那种重开屏的需要长一点。
+        long wait = getSharedPreferences("board", MODE_PRIVATE)
+                .getLong("appLaunchWaitMs", 2500);
         ui.postDelayed(new Runnable() {
             @Override public void run() { exec(idx, 1, 0); }
-        }, 2500);
+        }, wait);
+    }
+
+    /** 我们自己有没有退到后台(用来判断"目标 App 起来了") */
+    private volatile boolean selfStopped = false;
+
+    @Override protected void onStop() {
+        super.onStop();
+        selfStopped = true;
     }
 
     private void exec(int idx, int repeat, int interval) {
@@ -2514,6 +2529,38 @@ public class MainActivity extends Activity {
                           : ledMode.contains("手动") ? C_ACC : C_DIM);
     }
 
+    /**
+     * 控制通道断了就**自动重连**。
+     *
+     * ⚠️⚠️ 为什么必须有(用户实测):
+     *      HID 连着(手机认到了触摸屏)✅ 但**控制通道断了** ✅
+     *      界面上显示"蓝牙控制通道:未连接" ✅ 而用户不会去点那个手动按钮 ✅
+     *      结果:App 发的命令(包括「运行」)**全都发不出去** ⇒ 超时 ⇒
+     *      用户看到的就是"点了运行半天不动、灯一闪而过" ✅
+     *
+     *      之前只有手动按钮能连,断了就一直是断的 ✅
+     */
+    private long lastBleRetryAt = 0;
+    private void maybeReconnectBleCtrl() {
+        if (Ble.get().ready) return;                 // 好好的不用管
+        if (lastLink == null || !lastLink.hidReady()) return;  // HID 都没连,重连也没用
+        long now = System.currentTimeMillis();
+        if (now - lastBleRetryAt < 15000) return;    // 15 秒一次,别猛敲
+        lastBleRetryAt = now;
+        boardLog("控制通道断了,自动重连…");
+        Ble.get().connect(this, new Ble.Cb() {
+            @Override public void done(String body) {
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        boardLog("自动重连结果:" + Ble.get().stateText);
+                        updateBleCtrlRow();
+                        if (Ble.get().ready) fetchStatus();
+                    }
+                });
+            }
+        });
+    }
+
     /** 刷新「☁️ 服务器」那行 */
     private void updateServerRow() {
         if (serverRow == null) return;
@@ -2573,6 +2620,7 @@ public class MainActivity extends Activity {
                         //   ⚠️ 上次我把这两句插到了「连接蓝牙控制」按钮的回调里,
                         //      结果那行只在点按钮时才刷新,平时一直是空的。
                         updateServerRow();
+                        maybeReconnectBleCtrl();
                         maybeFlowSync();
                         if (System.currentTimeMillis() - lastPingAt > 30000) {
                             lastPingAt = System.currentTimeMillis();
@@ -3630,6 +3678,8 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        // ⚠️ 回到自己界面才复位 —— 用来判断"目标 App 起来了"(见 waitAppForegroundThenExec)
+        selfStopped = false;
         // 从 App 列表页回来时,刷新已选中的目标
         SharedPreferences sp = getSharedPreferences("board", MODE_PRIVATE);
         String n = sp.getString("appName", "");
