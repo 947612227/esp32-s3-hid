@@ -55,43 +55,69 @@ public class FlowSync {
                         try {
                             JSONObject d = new JSONObject(body);
                             JSONArray arr = d.optJSONArray("flows");
-                            long ver = d.optLong("ver", 0);
+                            final long ver = d.optLong("ver", 0);
                             final FlowStore store = new FlowStore(act);
-                            int pulled = 0, saved = 0, removed = 0;
 
-                            if (arr != null) {
-                                for (int i = 0; i < arr.length(); i++) {
-                                    JSONObject f = arr.getJSONObject(i);
-                                    String name = f.optString("name");
-                                    if (name.isEmpty()) continue;
-                                    pulled++;
-
-                                    if (f.optBoolean("deleted", false)) {
-                                        // 服务器说删了 ⇒ 本地也删,板子上也删
-                                        store.remove(name);
-                                        if (board != null) board.delete(name, null);
-                                        removed++;
-                                        continue;
-                                    }
-                                    // ① 元数据(状态)写本地
-                                    JSONObject m = f.optJSONObject("meta");
-                                    if (m != null) store.put(FlowStore.Meta.fromJson(m));
-                                    // ② 正文写板子
-                                    String text = f.optString("text", "");
-                                    if (board != null && !text.isEmpty()) {
-                                        board.save(name, text, null);
-                                        saved++;
-                                    }
+                            // 先处理元数据 + 收集要写板子的
+                            final java.util.List<String[]> toWrite = new java.util.ArrayList<>();
+                            int removed = 0;
+                            for (int i = 0; arr != null && i < arr.length(); i++) {
+                                JSONObject f = arr.getJSONObject(i);
+                                String name = f.optString("name");
+                                if (name.isEmpty()) continue;
+                                if (f.optBoolean("deleted", false)) {
+                                    store.remove(name);
+                                    if (board != null) board.delete(name, null);
+                                    removed++;
+                                    continue;
+                                }
+                                JSONObject m = f.optJSONObject("meta");
+                                if (m != null) store.put(FlowStore.Meta.fromJson(m));
+                                String text = f.optString("text", "");
+                                if (board != null && !text.isEmpty()) {
+                                    toWrite.add(new String[]{name, text});
                                 }
                             }
-                            setLastVer(act, ver);
-                            String info = (since == 0 ? "全量" : "增量")
-                                    + " " + pulled + " 条(板子写入 " + saved
-                                    + ",删除 " + removed + ") → 版本 " + ver;
-                            if (cb != null) cb.done(true, info);
+
+                            // ⚠️⚠️ 板子必须**一条一条串行写**,不能一次全丢出去。
+                            //      踩过的坑:一次性 submit 之后,Board 的请求队列
+                            //      被 20 秒轮询和中继占满(实测 monitor contention
+                            //      6 秒),后面的 save 全超时;而我的计数器不看结果
+                            //      就写"板子写入 N 条",日志在骗人 ——
+                            //      板子上其实一条都没多。
+                            writeSequential(act, board, toWrite, 0, 0, 0, ver,
+                                            since, removed, cb);
                         } catch (Throwable t) {
                             if (cb != null) cb.done(false, "解析失败:" + t.getMessage());
                         }
+                    }
+                });
+            }
+        });
+    }
+
+    /** 串行把流程写进板子(每写完一条再写下一条) */
+    private static void writeSequential(final Activity act, final Board board,
+                                        final java.util.List<String[]> list, final int i,
+                                        final int okN, final int failN, final long ver,
+                                        final long since, final int removed, final Cb cb) {
+        if (board == null || i >= list.size()) {
+            setLastVer(act, ver);
+            String info = (since == 0 ? "全量" : "增量") + " " + list.size() + " 条"
+                    + "(板子写入成功 " + okN + (failN > 0 ? ",失败 " + failN : "")
+                    + ",删除 " + removed + ") → 版本 " + ver;
+            if (cb != null) cb.done(true, info);
+            return;
+        }
+        final String[] kv = list.get(i);
+        board.save(kv[0], kv[1], new Board.Cb() {
+            @Override public void done(boolean ok, String body) {
+                // 每写完一条回主线程再写吓一条 —— 保持串行
+                act.runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        writeSequential(act, board, list, i + 1,
+                                okN + (ok ? 1 : 0), failN + (ok ? 0 : 1),
+                                ver, since, removed, cb);
                     }
                 });
             }

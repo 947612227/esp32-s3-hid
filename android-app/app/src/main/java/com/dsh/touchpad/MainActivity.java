@@ -596,14 +596,6 @@ public class MainActivity extends Activity {
                                 @Override public void run() {
                                     toast(Ble.get().stateText);
                                     updateBleCtrlRow();
-                        updateServerRow();
-                        maybeFlowSync();
-                        // 每 30 秒最多探一次 —— 顺带把状态刷出来
-                        // (别的服务器调用也会更新状态,所以这只是兜底)
-                        if (System.currentTimeMillis() - lastPingAt > 30000) {
-                            lastPingAt = System.currentTimeMillis();
-                            Server.ping(MainActivity.this, null);
-                        }
                                     if (Ble.get().ready) fetchStatus();
                                 }
                             });
@@ -982,6 +974,8 @@ public class MainActivity extends Activity {
     }
 
     private void loadScripts() {
+        // 同上:UI 没建好就别发请求了(回来了也没地方画)
+        if (scriptListBox == null) return;
         board.scripts(new Board.Cb() {
             @Override public void done(boolean ok, String body) {
                 if (!ok) {
@@ -1070,6 +1064,13 @@ public class MainActivity extends Activity {
     }
 
     private void renderScripts() {
+        // ⚠️⚠️ 必须判空 —— 踩过的崩溃:
+        //      FlowSync 在启动时拉流程,回来后调 loadScripts(),
+        //      而那一刻 scriptListBox 还没被 onCreate 赋值(UI 还没建完),
+        //      直接 NPE 把 App 崩掉(实测 crash log 就在 renderScripts:1066)。
+        //      任何"UI 就绪前触发 loadScripts()"的路径都会踩这个坑,
+        //      所以保护要加在**渲染这一层**,而不是每个调用点。
+        if (scriptListBox == null) return;
         sortScripts();
         scriptListBox.removeAllViews();
         countdownViews.clear();
@@ -2522,6 +2523,15 @@ public class MainActivity extends Activity {
                                     + "   (" + st.costMs + "ms)");
                             linkRow.setTextColor(st.hidReady() || st.wifi ? C_OK : C_WARN);
                         }
+                        // ☁️ 服务器状态行 + 启动时同步一次流程
+                        //   ⚠️ 上次我把这两句插到了「连接蓝牙控制」按钮的回调里,
+                        //      结果那行只在点按钮时才刷新,平时一直是空的。
+                        updateServerRow();
+                        maybeFlowSync();
+                        if (System.currentTimeMillis() - lastPingAt > 30000) {
+                            lastPingAt = System.currentTimeMillis();
+                            Server.ping(MainActivity.this, null);   // 兜底探活
+                        }
                         // 变了才重报 —— 别每 5 秒都发一次
                         String key = st.mode() + "|" + st.hidName;
                         if (!key.equals(lastLinkSent)) {
@@ -2819,7 +2829,17 @@ public class MainActivity extends Activity {
      * 往板子日志里塞一行 —— 定时这类"人在别的 App"时发生的事,
      * 事后只能靠日志排查(实测:定时没触发时无从下手)。
      */
+    /**
+     * 往"板子日志"里写一行。
+     *
+     * ⚠️⚠️ 同时也写 logcat —— 踩过的坑:
+     *      原来**只**调 board.appendLog(),数据要经 WiFi 发到板子。
+     *      可板子在 AP 模式时手机根本够不到它 ⇒ 这些日志**全丢了**,
+     *      排查时在 logcat 里一个字都看不到,白折腾很久。
+     *      现在两条路都走:本地 logcat 一定有,板子能收到就顺便存一份。
+     */
     private void boardLog(final String line) {
+        android.util.Log.i("TouchPad", line);
         try {
             if (board == null) return;
             board.appendLog(line, new Board.Cb() {

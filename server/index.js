@@ -710,15 +710,28 @@ app.post('/api/v1/app/flows', needApp, async (req, res) => {
       });
     }
 
+    // ⚠️⚠️ ver 必须是 **owner 范围内单调递增** 的,不能"每条从 1 开始"。
+    //
+    //    踩过的坑:原来 INSERT 写死 ver=1,于是两条流程的 ver 都是 1,
+    //    MAX(ver)=1 永远不变 ⇒ App 的增量拉取(ver > since)**永远拉不到东西**,
+    //    只有首次全量能用。表现就是"服务器新加的流程,App 重启也不下来"。
+    //
+    //    这里用"先查 MAX 再 +1"。极端并发下两个请求可能拿到同一个号
+    //    (概率极低,而且本项目只有一两个人用),真要严谨应该用
+    //    `UPDATE counters SET n=LAST_INSERT_ID(n+1)` 那种做法。
+    const [mx] = await db.q(
+      'SELECT COALESCE(MAX(ver),0) AS v FROM flows WHERE owner = ?', [owner]);
+    const nextVer = Number(mx ? mx.v : 0) + 1;
+
     if (cur) {
       await db.run(
         `UPDATE flows SET text = COALESCE(?, text), meta = COALESCE(?, meta),
-                          deleted = 0, ver = ver + 1
-         WHERE owner = ? AND name = ?`, [text, meta, owner, name]);
+                          deleted = 0, ver = ?
+         WHERE owner = ? AND name = ?`, [text, meta, nextVer, owner, name]);
     } else {
       await db.run(
         `INSERT INTO flows (owner, name, text, meta, ver, deleted)
-         VALUES (?,?,?,?,1,0)`, [owner, name, text, meta]);
+         VALUES (?,?,?,?,?,0)`, [owner, name, text, meta, nextVer]);
     }
 
     const nv = await db.one('SELECT ver FROM flows WHERE owner = ? AND name = ?', [owner, name]);
@@ -743,9 +756,13 @@ app.delete('/api/v1/app/flows/:name', needApp, async (req, res) => {
     if (!owner) return json(res, 400, { ok: false, message: '缺少 deviceId' });
     // ⚠️ 软删除而不是 DELETE —— 别的设备要能拉到"这条被删了"这个事实,
     //    硬删的话增量同步永远不知道它曾经存在。
+    // 同上的道理:删除也要拿一个**新的、更大的** ver,否则别的设备增量拉不到
+    const [mx2] = await db.q(
+      'SELECT COALESCE(MAX(ver),0) AS v FROM flows WHERE owner = ?', [owner]);
+    const delVer = Number(mx2 ? mx2.v : 0) + 1;
     await db.run(
-      `INSERT INTO flows (owner, name, ver, deleted) VALUES (?,?,1,1)
-       ON DUPLICATE KEY UPDATE deleted = 1, ver = ver + 1`, [owner, name]);
+      `INSERT INTO flows (owner, name, ver, deleted) VALUES (?,?,?,1)
+       ON DUPLICATE KEY UPDATE deleted = 1, ver = ?`, [owner, name, delVer, delVer]);
     const nv = await db.one('SELECT ver FROM flows WHERE owner=? AND name=?', [owner, name]);
     json(res, 200, { ok: true, name, ver: Number(nv ? nv.ver : 1) });
   } catch (e) {
