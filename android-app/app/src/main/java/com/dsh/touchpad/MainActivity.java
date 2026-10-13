@@ -2267,6 +2267,15 @@ public class MainActivity extends Activity {
 
     private final Runnable netTick = new Runnable() {
         @Override public void run() {
+            // ⚠️⚠️ **用户刚点了动作 ⇒ 这一轮轮询全部跳过**。
+            //      踩过的坑:用户点「运行」,RUN 入队后要和 20 秒轮询抢通道,
+            //      经常抢不到 ⇒ 超时 ⇒ App 重试 ⇒ 用户看到"等 30 秒才执行",
+            //      而且因为重试板子可能跑两遍。
+            //      让路 12 秒,用户操作就能独占通道立刻生效。
+            if (Ble.userActionPending()) {
+                ui.postDelayed(this, 1500);      // 让路期间也快一点回来看看
+                return;
+            }
             if (autoRefresh && !pollBusy) {
                 boolean did = false;
                 if (tab == TAB_STATUS) {

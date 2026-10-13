@@ -1041,6 +1041,9 @@ ScriptResult ScriptEngine::run(uint8_t index, StepHook hook,
   //     串口 RUN 在 main.cpp 里**直接**调 Scripts.run(),完全绕过去,
   //     表现就是"跑流程灯不变黄"(实测串口日志里根本没有状态色那行)。
   Led::setState(Led::ST_RUNNING);
+  // ⚠️ 记下开始时刻 —— 流程要是比 5 秒短,结束时补足到 5 秒,
+  //    否则"运行中黄"一闪而过(实测用户根本看不到)。
+  const uint32_t ledRunT0 = millis();
 
   // Repeat 步骤需要在执行期保存剩余次数,所以复制一份步骤到栈上/局部
   ScriptStep steps[SCRIPT_MAX_STEPS];
@@ -1234,6 +1237,14 @@ ScriptResult ScriptEngine::run(uint8_t index, StepHook hook,
        (unsigned long)(millis() - beginMs));
   res.ok = true;
   _stopRequested = false;
+  // ⚠️ 短流程要让黄色**至少亮满 5 秒** —— 不然一闪而过,用户以为灯没变。
+  //    实测:用户跑 1 步的「最近任务」,黄只亮了不到 1 秒。
+  {
+    uint32_t elapsed = millis() - ledRunT0;
+    if (elapsed < 5000) {
+      delay(5000 - elapsed);
+    }
+  }
   // 执行结束 → 绿 5 秒(同样放在这里,保证任何入口都走到)
   Led::finished();
 

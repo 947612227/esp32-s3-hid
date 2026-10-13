@@ -545,7 +545,33 @@ public class Ble {
      * 而周期轮询(STATUS/LOG/LIST)失败了无所谓,过几秒自然会再来;
      * 给它们重试只会把负载翻倍,反而更容易溢出(实测踩过)。
      */
+    /**
+     * 最近一次"用户主动动作"的时刻。
+     *
+     * ⚠️⚠️ 为什么要有它(实测踩的坑):
+     *      用户点「运行」→ RUN 入队 → 但队列前面堵着 20 秒轮询和中继的大响应
+     *      → RUN 迟迟发不出去 / 响应回不来 → **超时** → App 重试 → 这才跑起来。
+     *      用户侧表现就是「点了运行,等 30 秒才动」,而且因为重试,板子可能跑两遍。
+     *
+     *      所以:有用户动作时,**周期轮询全部让路**(见 MainActivity 的 netTick)。
+     */
+    private static volatile long lastUserActionAt = 0;
+
+    /** 用户动作刚刚发生 —— 轮询该暂停一会儿 */
+    public static boolean userActionPending() {
+        return System.currentTimeMillis() - lastUserActionAt < 12000;
+    }
+
+    /** 用户动作开始(调用方在发 RUN/SAVE/DEL/STOP 前调一下) */
+    public static void noteUserAction() {
+        lastUserActionAt = System.currentTimeMillis();
+    }
+
     private static boolean isUserAction(String cmd) {
+        if (cmd.startsWith("RUN ") || cmd.equals("STOP")
+                || cmd.startsWith("SAVE ") || cmd.startsWith("DEL ")) {
+            noteUserAction();
+        }
         return cmd.startsWith("RUN ") || cmd.equals("STOP")
             || cmd.startsWith("SAVE ") || cmd.startsWith("DEL ")
             || cmd.equals("LED") || cmd.startsWith("LED ")
