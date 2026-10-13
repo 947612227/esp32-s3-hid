@@ -10,12 +10,3 @@ secrets.h
 __pycache__/
 *.pyc
 shots/
-
-# 服务器运行时数据(含 MySQL 密码加密密钥)
-server/data/
-server/node_modules/
-node_modules/
-
-# 构建产物
-android-app/build/
-*.apk
