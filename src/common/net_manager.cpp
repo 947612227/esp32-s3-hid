@@ -1099,6 +1099,8 @@ String NetManager::scriptText(uint8_t index) {
   return scriptToText(*sc);
 }
 
+bool NetManager::isRunning() const { return s_state.running; }
+
 /** /api/status 的 JSON(HTTP 和 BLE 控制通道共用同一份) */
 String NetManager::statusJson() { return buildStatusJson(); }
 
@@ -1159,6 +1161,16 @@ static void handleLogs() {
  * 不传参数 = 进「找板子」模式(快-快-慢 + 绿色常亮)
  */
 static void handleLed() {
+  // ⚠️⚠️ **运行中禁止远程点灯**(需求明确要求)。
+  //     理由:点灯会干扰现场排查 —— 你正看着灯判断状态,
+  //     后台/App 一点就把颜色改掉了。
+  //     注意:串口那条**不拦** —— 那是本地调试,现场就要用。
+  if (s_state.running) {
+    s_server.send(409, "application/json",
+                  "{\"ok\":false,\"message\":\"板子正在执行流程,已禁止远程改灯"
+                  "(等它跑完再试;串口 LED 命令不受限)\"}");
+    return;
+  }
   const String mode = s_server.hasArg("mode") ? s_server.arg("mode") : String("");
   if (mode.equalsIgnoreCase("auto")) {
     Led::autoMode();
@@ -1419,7 +1431,10 @@ static void hbSend() {
     // ⚠️ 服务端够不到内网的板子,这是**唯一**的下行通道:
     //    板子每次心跳顺路把命令捎回来。所以最长要等一个心跳周期(2 分钟)。
     //    "立刻亮"请走 App(App 和板子有直连)。
-    if (resp.indexOf("\"led\"") >= 0) {
+    // ⚠️ 服务器下行也拦:运行中不接受远程改灯(和 HTTP/BLE 一致)
+    if (resp.indexOf("\"led\"") >= 0 && s_state.running) {
+      LOGLN("[led] 收到服务端点灯命令,但正在执行流程 → 忽略");
+    } else if (resp.indexOf("\"led\"") >= 0) {
       if (resp.indexOf("\"blink\":true") >= 0) {
         LOGLN("[led] 收到服务端命令:找板子模式");
         Led::identify();

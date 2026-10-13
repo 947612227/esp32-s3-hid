@@ -74,6 +74,14 @@ public:
    */
   bool reportFlowEvent(const char *flowName, const char *message);
 
+  /**
+   * 现在有没有流程在跑。
+   *
+   * ⚠️ 给状态灯用的 —— 灯要在"运行中"显示黄色 ✅
+   *    而这个状态原本藏在 net_manager.cpp 的 static 变量里,外面拿不到。
+   */
+  bool isRunning() const;
+
   /** 组装 /api/status 的 JSON(HTTP 和 BLE 控制通道共用) */
   String statusJson();
 

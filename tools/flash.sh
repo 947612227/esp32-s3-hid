@@ -8,6 +8,11 @@
 #    ./tools/flash.sh usb             # 烧 USB 版
 #    ./tools/flash.sh ble fresh       # 先全片擦除再烧(**新板子推荐**)
 #    ./tools/flash.sh ble "" /dev/cu.usbmodem1234    # 手动指定串口
+#    ./tools/flash.sh ble fresh "" --mac 28:84:85:89:78:c8   # 指定要烧哪块板
+#
+#  ⚠️⚠️ **插着两块以上板子时,必须用 --mac 指定** ——
+#      所有板子都叫 "USB Single Serial"、都是 CH343,设备名分不出来。
+#      只有 MAC 是可靠标识。用 ./tools/which-board.sh 先看清楚。
 #
 #  前置
 #  ────────────────────────────────────────────────────────────────────────
@@ -22,24 +27,72 @@ ENV_NAME="${1:-ble}"
 MODE="${2:-}"
 PORT="${3:-}"
 
+# ---- 解析 --mac(可以放在任意位置)----
+WANT_MAC=""
+_args=()
+for a in "$@"; do
+  case "$a" in
+    --mac) ;;
+    --mac=*) WANT_MAC="${a#--mac=}" ;;
+    *)
+      if [ "${_prev:-}" = "--mac" ]; then WANT_MAC="$a"; else _args+=("$a"); fi
+      ;;
+  esac
+  _prev="$a"
+done
+WANT_MAC=$(echo "$WANT_MAC" | tr 'A-Z' 'a-z')
+
 case "$ENV_NAME" in
   ble|usb|usb_touchtest) ;;
   *) echo "❌ 环境名只能是 ble / usb / usb_touchtest"; exit 1 ;;
 esac
 
-# ---- 1. 探测串口 ----
+# ---- 1. 探测串口(⚠️ 多块板子时必须指定 MAC)----
+ALL_PORTS=$(ls /dev/cu.usbmodem* /dev/cu.usbserial* /dev/cu.wchusbserial* 2>/dev/null || true)
+NPORTS=$(echo "$ALL_PORTS" | grep -c . || true)
+
 if [ -z "$PORT" ]; then
-  PORT=$(ls /dev/cu.usbmodem* /dev/cu.usbserial* /dev/cu.wchusbserial* 2>/dev/null | head -1 || true)
+  if [ "$NPORTS" -gt 1 ] && [ -z "$WANT_MAC" ]; then
+    echo "❌ 插着 $NPORTS 块板子,必须用 --mac 指明烧哪块。"
+    echo
+    ./tools/which-board.sh
+    echo "  例:./tools/flash.sh $ENV_NAME fresh "" --mac <上面某个 MAC>"
+    exit 1
+  fi
+  PORT=$(echo "$ALL_PORTS" | head -1)
 fi
 if [ -z "$PORT" ]; then
   echo "❌ 没找到串口。检查:"
   echo "     · 板子用 **USB-C 数据线**插到 Mac 了吗(有些线只供电不传数据)"
-  echo "     · 板子上有没有独立的 USB 口?ESP32-S3 是**原生 USB**,不要接 UART 那个"
   echo "     · 试一下:ls /dev/cu.*"
   exit 1
 fi
+
+# ---- 1b. 读 MAC 并核对 ----
+INFO=$(esptool.py --port "$PORT" flash_id 2>&1 || true)
+GOT_MAC=$(echo "$INFO" | grep -oE 'MAC: ([0-9a-f:]{17})' | awk '{print tolower($2)}')
+BNAME=$(awk -v m="$GOT_MAC" 'tolower($1)==m {print $2; exit}' tools/board-registry.txt 2>/dev/null || true)
+
 echo "  串口: $PORT"
 echo "  环境: $ENV_NAME"
+echo "  MAC : ${GOT_MAC:-⚠️ 读不到}"
+[ -n "$BNAME" ] && echo "  板子: $BNAME"
+
+if [ -n "$WANT_MAC" ]; then
+  if [ "$GOT_MAC" != "$WANT_MAC" ]; then
+    echo
+    echo "❌❌ **MAC 不匹配,拒绝烧录!**"
+    echo "     你要烧 : $WANT_MAC"
+    echo "     这个口 : $GOT_MAC"
+    echo "     换串口,或确认是不是插错了。"
+    exit 1
+  fi
+  echo "  ✅ MAC 校验通过(就是你要烧的那块)"
+elif [ "$NPORTS" -gt 1 ]; then
+  echo
+  echo "⚠️ 插着多块板子但没指定 --mac —— 上面就是将被烧的那块,3 秒后继续…"
+  sleep 3
+fi
 
 # ---- 2. 编译 ----
 echo

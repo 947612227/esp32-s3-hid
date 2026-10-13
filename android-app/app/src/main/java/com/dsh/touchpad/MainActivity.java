@@ -78,6 +78,9 @@ public class MainActivity extends Activity {
     private TextView linkRow;
     /** 蓝牙**控制**通道的状态行(和上面的 HID 不是一回事) */
     private TextView bleCtrlRow;
+
+    /** 「☁️ 服务器」那一行 —— 让用户看到云端通没通 */
+    private TextView serverRow;
     /** 上次检测到的连接方式 + 上报过的值(变了才重报) */
     private Link.State lastLink = null;
     private String lastLinkSent = "";
@@ -558,12 +561,33 @@ public class MainActivity extends Activity {
         bleCtrlRow.setPadding(dp(2), dp(6), dp(2), dp(2));
         linkCard.addView(bleCtrlRow);
 
+        // ☁️ 服务器连通状态 —— 原来所有云端调用都静默失败,用户看不到
+        serverRow = new TextView(this);
+        serverRow.setTextSize(13);
+        serverRow.setTextColor(C_DIM);
+        serverRow.setPadding(dp(2), dp(6), dp(2), dp(2));
+        linkCard.addView(serverRow);
+
         linkCard.addView(btnRow(null, new String[][]{
                 {"🔵 连接蓝牙控制", "conn"}, {"⚙ 控制方式", "mode"},
-                {"💡 点亮板子", "led"}
+                {"💡 点亮板子", "led"}, {"☁️ 测服务器", "srv"}
         }, new View.OnClickListener() {
             @Override public void onClick(View v) {
                 if ("led".equals(v.getTag())) { showLedDialog(); return; }
+                if ("srv".equals(v.getTag())) {
+                    toast("正在测服务器连通…");
+                    Server.ping(MainActivity.this, new Server.Cb() {
+                        @Override public void done(final boolean ok, final String body) {
+                            runOnUiThread(new Runnable() {
+                                @Override public void run() {
+                                    updateServerRow();
+                                    toast(ok ? "✅ 服务器通" : "❌ 连不上服务器");
+                                }
+                            });
+                        }
+                    });
+                    return;
+                }
                 if ("conn".equals(v.getTag())) {
                     toast("正在连接蓝牙控制通道…");
                     Ble.get().connect(MainActivity.this, new Ble.Cb() {
@@ -572,6 +596,13 @@ public class MainActivity extends Activity {
                                 @Override public void run() {
                                     toast(Ble.get().stateText);
                                     updateBleCtrlRow();
+                        updateServerRow();
+                        // 每 30 秒最多探一次 —— 顺带把状态刷出来
+                        // (别的服务器调用也会更新状态,所以这只是兜底)
+                        if (System.currentTimeMillis() - lastPingAt > 30000) {
+                            lastPingAt = System.currentTimeMillis();
+                            Server.ping(MainActivity.this, null);
+                        }
                                     if (Ble.get().ready) fetchStatus();
                                 }
                             });
@@ -2434,6 +2465,17 @@ public class MainActivity extends Activity {
 
     private android.app.AlertDialog ledDlg;
     private void ledDismiss() { if (ledDlg != null) { ledDlg.dismiss(); ledDlg = null; } }
+
+    /** 刷新「☁️ 服务器」那行 */
+    private void updateServerRow() {
+        if (serverRow == null) return;
+        serverRow.setText("☁️ 服务器:" + Server.stateText());
+        serverRow.setTextColor(Server.lastState == 1 ? C_OK
+                             : (Server.lastState == -1 ? C_ERR : C_DIM));
+    }
+
+    /** 上次探服务器的时间(每 30 秒最多一次) */
+    private long lastPingAt = 0;
 
     private void linkTick() {
         if (linkBusy) return;

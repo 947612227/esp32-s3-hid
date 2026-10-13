@@ -94,17 +94,36 @@ void identify() {
 
 bool identifying() { return s_identify; }
 
-void setStateColor(int state) {
+/**
+ * 状态灯配色 —— 按需求定的四态。
+ *
+ * ⚠️ 亮度都压得比较低(不是 255 满亮):
+ *    这是**状态指示**,不是照明。满亮在桌面很刺眼,夜里更难受。
+ *    想临时亮满色用 `LED r g b`(手动模式,见 set())。
+ */
+void setState(int state) {
   if (s_identify) return;               // 找板子期间别被盖掉
   // ⚠️ 手动常亮(holdMs==0)时,状态色**完全不许动它**
   if (s_manual && s_holdUntil == 0) return;
   if (state == s_state) return;
   s_state = state;
   switch (state) {
-    case 1:  write(0, 12, 0);  break;   // 已连接:暗绿
-    case 2:  write(18, 14, 0); break;   // 执行中:暗黄
-    default: write(0, 0, 14);  break;   // 未连接:暗蓝
+    case ST_IDLE:    write(60, 0, 0);   break;   // 待机:红
+    case ST_RUNNING: write(60, 45, 0);  break;   // 运行:黄
+    case ST_DONE:    write(0, 60, 0);   break;   // 结束:绿
+    default:         write(0, 0, 0);    break;   // 闲置:灭
   }
+}
+
+void setStateColor(int state) { setState(state); }
+
+void finished() {
+  // 绿 5 秒,然后 tick() 会自动回待机
+  s_identify = false;
+  s_manual = false;
+  write(0, 60, 0);
+  s_state = ST_DONE;
+  s_holdUntil = millis() + 5000;
 }
 
 void tick() {
@@ -115,12 +134,13 @@ void tick() {
     setStateColor(0);
     return;
   }
-  // 限时的手动色到点了 → **回到自动**(不是留在手动模式)
+  // 限时色(含 finished() 的绿)到点了 → 回自动。
+  // ⚠️ 这里只把 s_state 置成 -1,让 main loop 下一轮重新报真实状态;
+  //    不去猜"现在该是什么色" —— 那需要访问 HID/脚本状态,层次不对。
   if (!s_identify && s_holdUntil && now > s_holdUntil) {
     s_holdUntil = 0;
     s_manual = false;
     s_state = -1;
-    setStateColor(0);
   }
 }
 

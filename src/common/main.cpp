@@ -632,9 +632,25 @@ void loop() {
   // 执行 Web 端排队的一次性请求 + 定时调度(带进度上报与"停止"支持)
   netServiceScripts();
 
-  // RGB 灯:处理"保持时间到了" + 常态状态色
-  Led::tick();
-  Led::setStateColor(hidTransport().ready() ? 1 : 0);
+  // ---- RGB 状态灯 ----
+  //  待机(连着没跑) = 红 / 运行中 = 黄 / 刚跑完 = 绿 5 秒 / 闲置(没连) = 灭
+  //
+  //  ⚠️ "执行结束"没有回调可用,所以这里**盯状态跳变**:
+  //     上一轮在跑、这一轮不跑了 ⇒ 就是刚结束 ⇒ 亮绿灯。
+  {
+    static bool wasRunning = false;
+    bool running = netManager().isRunning();
+    Led::tick();                       // 先处理"限时色到期"
+    if (running) {
+      Led::setState(Led::ST_RUNNING);
+    } else if (wasRunning) {
+      Led::finished();                 // 刚结束 → 绿 5 秒
+    } else if (!Led::identifying() && !Led::isManual()) {
+      // 没在跑也没刚结束:连着 = 待机红,没连 = 闲置灭
+      Led::setState(hidTransport().ready() ? Led::ST_IDLE : Led::ST_OFF);
+    }
+    wasRunning = running;
+  }
 
   // BOOT 键触发自检(按下沿)
   static bool lastBtn = true;

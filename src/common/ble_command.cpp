@@ -123,6 +123,11 @@ String bleHandleCommand(const String &rawReq) {
   // ---------------------------------------------------------------- 点灯
   //   LED r g b [ms]   设颜色;不传参数 = 找板子模式
   if (op == "LED") {
+    // ⚠️ 同 /api/led:运行中禁止**远程**点灯(蓝牙控制通道也算远程)。
+    //    串口那条不拦 —— 那是本地调试。
+    if (netManager().isRunning()) {
+      return err("板子正在执行流程,已禁止远程改灯(等它跑完再试)");
+    }
     if (rest.length() == 0) {
       Led::identify();
       return "{\"ok\":true,\"message\":\"已进入找板子模式(灯闪 60 秒)\"}";

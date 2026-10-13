@@ -817,8 +817,15 @@ app.get('/api/admin/boards', needLogin, async (req, res) => {
 app.get('/api/admin/event-stats', needLogin, async (req, res) => {
   try {
     const days = Math.min(Math.max(Number(req.query.days) || 0, 0), 365);
-    const since = days > 0
+    // ⚠️⚠️ 两个查询的别名不同,条件必须分开拼 —— 踩过的坑:
+    //      原来只有一个 `since` 且写死了 `e.at`,
+    //      而下面"汇总"那个查询是 `FROM board_events`(**没有别名 e**),
+    //      一带 ?days= 就报 `Unknown column 'e.at' in 'where clause'`。
+    //      旧前端从来不传 days,所以这个 bug 一直潜伏着。
+    const sinceGrp = days > 0
       ? `AND e.at >= DATE_SUB(NOW(), INTERVAL ${days} DAY)` : '';
+    const sinceSum = days > 0
+      ? `AND at >= DATE_SUB(NOW(), INTERVAL ${days} DAY)` : '';
     // ⚠️ JOIN 必须显式 COLLATE —— 两张表排序规则不一致时 MySQL 直接报错
     //    (之前就是这么把服务搞下线的)
     const rows = await db.q(`
@@ -836,14 +843,14 @@ app.get('/api/admin/event-stats', needLogin, async (req, res) => {
       FROM board_events e
       LEFT JOIN boards b
         ON b.mac COLLATE utf8mb4_unicode_ci = e.mac COLLATE utf8mb4_unicode_ci
-      WHERE e.type = 'flow_event' ${since}
+      WHERE e.type = 'flow_event' ${sinceGrp}
       GROUP BY e.mac, e.flow
       ORDER BY total DESC, last_at DESC
       LIMIT 100`);
     const t = await db.one(`
       SELECT COUNT(*) AS total,
              SUM(CASE WHEN at >= CURDATE() THEN 1 ELSE 0 END) AS today
-      FROM board_events WHERE type = 'flow_event' ${since}`);
+      FROM board_events WHERE type = 'flow_event' ${sinceSum}`);
     json(res, 200, { ok: true, stats: rows,
                      summary: { total: t ? t.total : 0, today: t ? t.today : 0 } });
   } catch (e) {

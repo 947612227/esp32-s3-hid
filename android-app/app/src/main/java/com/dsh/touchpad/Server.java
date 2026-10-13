@@ -54,6 +54,47 @@ public class Server {
 
     // ---------------------------------------------------------------- HTTP
 
+    // ================================================================ 服务器连通状态
+    //
+    //  ⚠️ 为什么要有这个:
+    //      原来所有服务器调用都是 **fire-and-forget** —— 失败就静默吞掉。
+    //      用户根本不知道"云端到底通没通",只看到某些功能时好时坏。
+    //      现在每次请求都顺手记一笔结果,界面直接显示。
+    //
+    //  值:0 = 还没试过 / 1 = 通 / -1 = 不通
+    public static volatile int    lastState = 0;
+    public static volatile long   lastOkAt  = 0;
+    public static volatile String lastErr   = "";
+
+    public static void markOk() {
+        lastState = 1; lastOkAt = System.currentTimeMillis(); lastErr = "";
+    }
+    public static void markFail(String why) {
+        lastState = -1; lastErr = why == null ? "" : why;
+    }
+
+    /** 一行文本,给界面用 */
+    public static String stateText() {
+        if (lastState == 0) return "检测中…";
+        if (lastState == 1) {
+            long ago = (System.currentTimeMillis() - lastOkAt) / 1000;
+            String t = ago < 60 ? ago + " 秒前"
+                     : (ago < 3600 ? (ago / 60) + " 分钟前" : (ago / 3600) + " 小时前");
+            return "已连接(" + t + ")";
+        }
+        return "连不上" + (lastErr.isEmpty() ? "" : ":" + lastErr);
+    }
+
+    /**
+     * 显式探活一次。
+     *
+     * 用 `/api/v1/board/health` —— 最轻的接口(只回 {ok:true})✅
+     * 拿得到响应就说明网络通 ✅
+     */
+    public static void ping(Context ctx, Cb cb) {
+        req("/api/v1/board/health", "GET", null, cb);
+    }
+
     private static void req(final String path, final String method, final String body,
                             final Cb cb) {
         new Thread(new Runnable() {
@@ -86,9 +127,13 @@ public class Server {
                         r.close();
                         text = sb.toString();
                     }
-                    if (cb != null) cb.done(code >= 200 && code < 300, text);
+                    boolean ok = code >= 200 && code < 300;
+                    // ⚠️ 顺手记一笔连通状态 —— 不用额外发请求
+                    if (ok) markOk(); else markFail("HTTP " + code);
+                    if (cb != null) cb.done(ok, text);
                 } catch (Throwable e) {
-                    // 连不上/超时 —— 静默,不打扰用户
+                    // 连不上/超时 —— 不打扰用户,但**要让界面看得到**
+                    markFail(String.valueOf(e.getMessage()));
                     if (cb != null) cb.done(false, String.valueOf(e.getMessage()));
                 } finally {
                     if (c != null) c.disconnect();
