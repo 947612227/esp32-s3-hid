@@ -1646,6 +1646,10 @@ void netServiceScripts() {
       const Script *sc = Scripts.at(s_schedIndex);
       if (sc) {
         s_state.running = true;
+      // ⚠️⚠️ 灯必须在这里点亮,不能靠主循环"轮询 isRunning()" ——
+      //     流程是在本函数里**同步跑完**的,running 在同一次调用里
+      //     先 true 再 false,主循环永远看不到中间的 true(实测灯不变黄)。
+      Led::setState(Led::ST_RUNNING);
         s_state.index = s_schedIndex;
         s_state.totalSteps = sc->stepCount;
         s_state.repeatDone = 1;

@@ -633,24 +633,15 @@ void loop() {
   netServiceScripts();
 
   // ---- RGB 状态灯 ----
-  //  待机(连着没跑) = 红 / 运行中 = 黄 / 刚跑完 = 绿 5 秒 / 闲置(没连) = 灭
-  //
-  //  ⚠️ "执行结束"没有回调可用,所以这里**盯状态跳变**:
-  //     上一轮在跑、这一轮不跑了 ⇒ 就是刚结束 ⇒ 亮绿灯。
-  {
-    static bool wasRunning = false;
-    bool running = netManager().isRunning();
-    Led::tick();                       // 先处理"限时色到期"
-    if (running) {
-      Led::setState(Led::ST_RUNNING);
-    } else if (wasRunning) {
-      Led::finished();                 // 刚结束 → 绿 5 秒
-    } else if (!Led::identifying() && !Led::isManual()) {
-      // 没在跑也没刚结束:连着 = 待机红,没连 = 闲置灭
-      Led::setState(hidTransport().ready() ? Led::ST_IDLE : Led::ST_OFF);
-    }
-    wasRunning = running;
-  }
+  //  【设计】事件驱动,不是轮询:
+  //    · 开始跑 / 跑完  → 由 net_manager 在状态变化处**直接**设灯
+  //      (流程是在那里同步跑完的,running 在同一次调用里先 true 再 false,
+  //       主循环轮询永远看不到中间的 true —— 实测灯不变黄 ✅)
+  //    · 这里只负责**静息态**:连着=红,没连=灭
+  //    · setState() 内部会跳过"限时色保持期"(比如刚跑完的 5 秒绿)
+  //      和"手动常亮",所以这里无脑调也不会盖掉它们
+  Led::tick();
+  Led::setState(hidTransport().ready() ? Led::ST_IDLE : Led::ST_OFF);
 
   // BOOT 键触发自检(按下沿)
   static bool lastBtn = true;

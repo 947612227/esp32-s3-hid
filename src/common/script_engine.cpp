@@ -2,6 +2,7 @@
 //  ScriptEngine 实现
 // ============================================================================
 #include "script_engine.h"
+#include "led.h"   // 流程开始/结束要改状态灯
 
 #include <LittleFS.h>
 
@@ -1033,6 +1034,14 @@ ScriptResult ScriptEngine::run(uint8_t index, StepHook hook,
   LOGF("%s 执行 [%u] %s (%u 步)", TAG, (unsigned)index, sc->name,
        (unsigned)sc->stepCount);
 
+  // ⚠️⚠️ 状态灯必须在这里点 —— **这是所有流程的唯一必经之路**。
+  //     踩过的坑:一开始放在 net_manager 的 netServiceScripts() 里,
+  //     但那条路有两个限制:① 要求手机 HID 已连(Touch.ready())
+  //     ② 只有 Web/BLE 触发的才走它。
+  //     串口 RUN 在 main.cpp 里**直接**调 Scripts.run(),完全绕过去,
+  //     表现就是"跑流程灯不变黄"(实测串口日志里根本没有状态色那行)。
+  Led::setState(Led::ST_RUNNING);
+
   // Repeat 步骤需要在执行期保存剩余次数,所以复制一份步骤到栈上/局部
   ScriptStep steps[SCRIPT_MAX_STEPS];
   memcpy(steps, sc->steps, sizeof(ScriptStep) * sc->stepCount);
@@ -1225,5 +1234,8 @@ ScriptResult ScriptEngine::run(uint8_t index, StepHook hook,
        (unsigned long)(millis() - beginMs));
   res.ok = true;
   _stopRequested = false;
+  // 执行结束 → 绿 5 秒(同样放在这里,保证任何入口都走到)
+  Led::finished();
+
   return res;
 }

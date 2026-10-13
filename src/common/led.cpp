@@ -105,8 +105,16 @@ void setState(int state) {
   if (s_identify) return;               // 找板子期间别被盖掉
   // ⚠️ 手动常亮(holdMs==0)时,状态色**完全不许动它**
   if (s_manual && s_holdUntil == 0) return;
+  // ⚠️⚠️ 限时色(比如 finished() 的 5 秒绿)在保持期内也**不许盖**。
+  //      踩过的坑:finished() 刚设好绿,主循环下一轮就 setState(ST_IDLE)
+  //      把它盖成红 ⇒ 用户根本看不到"执行结束变绿"。
+  if (s_holdUntil && millis() < s_holdUntil) return;
   if (state == s_state) return;
   s_state = state;
+  // 每次状态变化打一行 —— 没有眼睛也能验证状态机对不对(实测很有用)
+  Serial.printf("[led] 状态色 → %s\n",
+                state == ST_IDLE ? "红(待机)" : state == ST_RUNNING ? "黄(运行中)"
+                : state == ST_DONE ? "绿(刚跑完)" : "灭(闲置)");
   switch (state) {
     case ST_IDLE:    write(60, 0, 0);   break;   // 待机:红
     case ST_RUNNING: write(60, 45, 0);  break;   // 运行:黄
@@ -118,6 +126,7 @@ void setState(int state) {
 void setStateColor(int state) { setState(state); }
 
 void finished() {
+  Serial.println(F("[led] 执行结束 → 绿 5 秒"));
   // 绿 5 秒,然后 tick() 会自动回待机
   s_identify = false;
   s_manual = false;
