@@ -1,12 +1,26 @@
-# 构建产物
+# ---- 构建产物 ----
 .pio/
 .pioenvs/
 .piolibdeps/
+android-app/build/
+*.apk
+*.o
+*.d
+dist/
 
-# 含 WiFi 凭据,不进版本库
+# ---- 含凭据,不进版本库 ----
 secrets.h
 
-# Python / 运行时产物
+# ---- 服务器运行时数据(含 MySQL 密码加密密钥)----
+server/data/
+server/node_modules/
+node_modules/
+
+# ---- Python / 运行时产物 ----
 __pycache__/
 *.pyc
 shots/
+
+# ---- macOS 垃圾 ----
+._*
+.DS_Store
