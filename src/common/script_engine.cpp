@@ -856,6 +856,14 @@ const Script *ScriptEngine::find(const char *name) const {
   return nullptr;
 }
 
+int ScriptEngine::indexOf(const char *name) const {
+  if (name == nullptr) return -1;
+  for (uint8_t i = 0; i < _count; i++) {
+    if (strcasecmp(_scripts[i].name, name) == 0) return i;
+  }
+  return -1;
+}
+
 void ScriptEngine::forEach(void (*cb)(const Script &, void *ctx),
                            void *ctx) const {
   for (uint8_t i = 0; i < _count; i++) cb(_scripts[i], ctx);
@@ -886,6 +894,9 @@ bool ScriptEngine::saveFromText(const char *name, const char *text,
                                 char *errBuf, size_t errLen) {
   if (errBuf && errLen) errBuf[0] = '\0';
   if (!_mounted) { setErr(errBuf, errLen, "文件系统未挂载"); return false; }
+  if (isRunningFlow(name)) {
+    setErr(errBuf, errLen, "「%s」正在执行,先停止再修改", name); return false;
+  }
   if (name == nullptr || *name == '\0') {
     setErr(errBuf, errLen, "脚本名不能为空"); return false;
   }
@@ -924,6 +935,7 @@ bool ScriptEngine::saveFromText(const char *name, const char *text,
 
 bool ScriptEngine::remove(const char *name) {
   if (!_mounted || name == nullptr) return false;
+  if (isRunningFlow(name)) return false;   // 调用方先用 isRunningFlow() 给出明确提示
   String path = String(SCRIPT_DIR) + "/" + name + ".txt";
   if (!LittleFS.exists(path)) return false;
   LittleFS.remove(path);
@@ -1110,7 +1122,7 @@ static String toAbsScriptPath(const char *rawName) {
 }
 
 int ScriptEngine::removeAll() {
-  if (!_mounted) return -1;
+  if (!_mounted || _running) return -1;   // 执行中不许清空
   int removed = 0;
   File dir = LittleFS.open(SCRIPT_DIR);
   if (!dir || !dir.isDirectory()) return 0;
@@ -1150,15 +1162,23 @@ ScriptResult ScriptEngine::run(uint8_t index, StepHook hook,
     setErr(res.error, sizeof(res.error), "没有第 %u 个脚本", (unsigned)index);
     return res;
   }
-  // 运行标志:任何 return 路径都会自动复位
+  // 运行标志 + 正在跑的流程名:任何 return 路径都会自动复位
   struct RunningFlag {
     volatile bool &f;
-    explicit RunningFlag(volatile bool &x) : f(x) { f = true; }
-    ~RunningFlag() { f = false; }
-  } runningFlag(_running);
+    char *name;
+    RunningFlag(volatile bool &x, char *n) : f(x), name(n) { f = true; }
+    ~RunningFlag() { f = false; name[0] = '\0'; }
+  } runningFlag(_running, _runningName);
 
-  LOGF("%s 执行 [%u] %s (%u 步)", TAG, (unsigned)index, sc->name,
-       (unsigned)sc->stepCount);
+  // ⚠️ 执行中会处理蓝牙/网页请求(等待钩子里),删/改**别的**流程会 reload() 重写脚本表,
+  //    sc 指向的内容随时会变(甚至变成别的流程)。
+  //    所以只在这里读一次 sc,之后全用快照:步数 total、名字 _runningName、步骤副本 steps。
+  const uint8_t total = sc->stepCount;
+  strncpy(_runningName, sc->name, SCRIPT_NAME_LEN - 1);
+  _runningName[SCRIPT_NAME_LEN - 1] = '\0';
+
+  LOGF("%s 执行 [%u] %s (%u 步)", TAG, (unsigned)index, _runningName,
+       (unsigned)total);
 
   // ⚠️⚠️ 状态灯必须在这里点 —— **这是所有流程的唯一必经之路**。
   //     踩过的坑:一开始放在 net_manager 的 netServiceScripts() 里,
@@ -1176,13 +1196,14 @@ ScriptResult ScriptEngine::run(uint8_t index, StepHook hook,
   struct StepCopy {
     ScriptStep *p;
     ~StepCopy() { free(p); }
-  } copy{(ScriptStep *)malloc(sizeof(ScriptStep) * (sc->stepCount ? sc->stepCount : 1))};
+  } copy{(ScriptStep *)malloc(sizeof(ScriptStep) * (total ? total : 1))};
   if (copy.p == nullptr) {
     setErr(res.error, sizeof(res.error), "内存不足,无法执行");
     return res;
   }
   ScriptStep *steps = copy.p;
-  memcpy(steps, sc->steps, sizeof(ScriptStep) * sc->stepCount);
+  memcpy(steps, sc->steps, sizeof(ScriptStep) * total);
+  sc = nullptr;   // 之后禁止再读脚本表(见上面快照说明)
   uint16_t repeatLeft[SCRIPT_MAX_STEPS] = {0};
 
   uint32_t beginMs = millis();
@@ -1195,7 +1216,7 @@ ScriptResult ScriptEngine::run(uint8_t index, StepHook hook,
   uint32_t lastServiceMs = millis();    // 上次让出给网络/蓝牙的时刻
   _stopRequested = false;
 
-  while (pc < sc->stepCount) {
+  while (pc < total) {
     if (idleSteps > IDLE_STEPS_MAX) {
       setErr(res.error, sizeof(res.error), "连续 %lu 步没有点击/等待,疑似死循环",
              (unsigned long)IDLE_STEPS_MAX);
@@ -1208,7 +1229,7 @@ ScriptResult ScriptEngine::run(uint8_t index, StepHook hook,
       lastServiceMs = millis();
     }
     // 每步前询问外部(Web 的"停止"按钮)
-    if (hook != nullptr && !hook((uint16_t)pc, sc->stepCount, hookCtx)) {
+    if (hook != nullptr && !hook((uint16_t)pc, total, hookCtx)) {
       setErr(res.error, sizeof(res.error), "被用户中止");
       LOGF("%s 已中止于第 %u 步", TAG, (unsigned)pc);
       _stopRequested = false;
@@ -1224,7 +1245,7 @@ ScriptResult ScriptEngine::run(uint8_t index, StepHook hook,
       char desc[STEP_NOTE_LEN + 24];
       stepDesc(st, desc, sizeof(desc));
       LOGF("%s [%u/%u] %s", TAG, (unsigned)(pc + 1),
-           (unsigned)sc->stepCount, desc);
+           (unsigned)total, desc);
     }
 
     switch (st.op) {
@@ -1311,7 +1332,7 @@ ScriptResult ScriptEngine::run(uint8_t index, StepHook hook,
         if (!pageContains(st.note)) {
           // 条件不成立 → 跳到 else 之后 / endif 之后
           uint16_t t = st.next;
-          if (t >= sc->stepCount) { pc = sc->stepCount; advance = false; break; }
+          if (t >= total) { pc = total; advance = false; break; }
           pc = (uint8_t)t;
           advance = false;
           LOGF("%s   → 不匹配,跳到第 %u 步", TAG, (unsigned)(t + 1));
@@ -1338,12 +1359,12 @@ ScriptResult ScriptEngine::run(uint8_t index, StepHook hook,
       case StepOp::EndLoop: {
         // 循环体跑完一轮。
         uint16_t loopPc = st.next;                 // 配对的 Repeat 下标
-        if (loopPc < sc->stepCount && repeatLeft[loopPc] > 1) {
+        if (loopPc < total && repeatLeft[loopPc] > 1) {
           repeatLeft[loopPc]--;
           pc = (uint8_t)loopPc;                    // 回到 Repeat,再走一遍循环体
           advance = false;
         } else {
-          if (loopPc < sc->stepCount) repeatLeft[loopPc] = 0;
+          if (loopPc < total) repeatLeft[loopPc] = 0;
         }
         break;
       }
@@ -1352,7 +1373,7 @@ ScriptResult ScriptEngine::run(uint8_t index, StepHook hook,
         // 把事件发到控制中心(服务器存表 + 可选推 webhook)。
         // 走 hook 而不是直接调 netManager,是为了保持引擎不依赖网络层。
         if (s_notifyHook) {
-          s_notifyHook(sc->name, st.note);
+          s_notifyHook(_runningName, st.note);
           LOGF("%s   → 已通知服务器:%s", TAG, st.note);
         } else {
           LOGF("%s   → 通知服务器失败:没有接上回调", TAG);
@@ -1362,10 +1383,10 @@ ScriptResult ScriptEngine::run(uint8_t index, StepHook hook,
       case StepOp::Break: {
         // 立即跳出最内层循环:直接跳到那个循环 endloop 之后。
         uint16_t out2 = st.next;
-        if (out2 < sc->stepCount) {
+        if (out2 < total) {
           pc = (uint8_t)out2;
         } else {
-          pc = sc->stepCount;                      // 循环就在末尾 → 直接结束
+          pc = total;                      // 循环就在末尾 → 直接结束
         }
         advance = false;
         LOGF("%s   → break:跳出循环,从第 %u 步继续", TAG, (unsigned)(pc + 1));

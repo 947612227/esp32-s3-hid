@@ -249,6 +249,10 @@ String bleHandleCommand(const String &rawReq) {
   if (op == "DEL") {
     String name = argAt(rest, 0);
     if (name.isEmpty()) return err("缺少流程名");
+    // ⚠️ DEL 是同步处理的,流程执行中也会被处理(等待钩子里) —— 正在跑的那个不许删
+    if (Scripts.isRunningFlow(name.c_str())) {
+      return err("「" + name + "」正在执行,先停止再删除");
+    }
     return Scripts.remove(name.c_str())
         ? "{\"ok\":true,\"message\":\"已删除 " + esc(name) + "\"}"
         : err("删除失败(不存在?)");

@@ -187,6 +187,8 @@ public:
 
   const Script *at(uint8_t index) const;
   const Script *find(const char *name) const;
+  // 按名字查序号(-1 = 没有)。⚠️ 删/增流程后序号会变,长期持有请存名字
+  int indexOf(const char *name) const;
 
   void forEach(void (*cb)(const Script &, void *ctx), void *ctx) const;
 
@@ -206,6 +208,10 @@ public:
 
   // 是否有流程正在执行(不管从串口/HTTP/BLE/定时哪个入口进来)
   bool running() const { return _running; }
+  // name 是不是正在执行的那个流程(删除/覆盖它要先停止)
+  bool isRunningFlow(const char *name) const {
+    return _running && name != nullptr && strcasecmp(_runningName, name) == 0;
+  }
 
   // 把文本写入 /scripts/<name>.txt 并重新载入;errBuf 返回失败原因
   bool saveFromText(const char *name, const char *text, char *errBuf,
@@ -243,6 +249,7 @@ private:
   bool    _mounted = false;
   volatile bool _stopRequested = false;
   volatile bool _running = false;   // run() 执行期间为 true
+  char _runningName[SCRIPT_NAME_LEN] = {0};   // 正在执行的流程名(run() 开头的快照)
 };
 
 extern ScriptEngine Scripts;

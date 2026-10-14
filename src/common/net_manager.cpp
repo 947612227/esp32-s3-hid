@@ -49,7 +49,10 @@ static RunRequest    s_request;
 static RunState      s_state;
 
 static bool     s_schedActive = false;
-static uint8_t  s_schedIndex = 0;
+static uint8_t  s_schedIndex = 0;          // 每次执行前按 s_schedName 重新解析
+// ⚠️ 定时循环按**名字**记:以前只记序号,循环期间删掉排在前面的流程,
+//    序号整体前移 ⇒ 下一轮跑的就是另一个流程了
+static char     s_schedName[SCRIPT_NAME_LEN] = {0};
 static uint32_t s_schedIntervalMs = 100;   // P9:频率单位改为毫秒,默认 100ms
 static uint32_t s_schedNextAt = 0;
 // 连续执行时长(0 = 不限,一直跑到手动停)
@@ -77,6 +80,8 @@ bool scheduleActive() { return s_schedActive; }
 
 void requestSchedule(int index, uint32_t intervalMs, uint32_t durationMs) {
   s_schedIndex = (uint8_t)index;
+  const Script *target = Scripts.at(s_schedIndex);
+  strncpy(s_schedName, target ? target->name : "", sizeof(s_schedName) - 1);
   // 频率下限 10ms:实测 BLE 单次报文最小间隔约 11ms,再小没有意义
   s_schedIntervalMs = intervalMs < 10 ? 10 : intervalMs;
   s_schedDurationMs = durationMs;                 // 0 = 不限
@@ -438,8 +443,7 @@ j += "\"sched\":{";
 j += "\"active\":" + String(s_schedActive ? "true" : "false") + ",";
 j += "\"remainMs\":" + String(scheduleRemainMs()) + ",";
 j += "\"durationMs\":" + String(s_schedDurationMs) + ",";
-const Script *sc = Scripts.at(s_schedIndex);
-j += "\"name\":\"" + jsonEscape(String(sc ? sc->name : "")) + "\",";
+j += "\"name\":\"" + jsonEscape(String(s_schedName)) + "\",";
 j += "\"intervalMs\":" + String(s_schedIntervalMs);
 j += "}}";
   return j;
@@ -705,6 +709,11 @@ static void handleDelete() {
     return;
   }
   String name = s_server.arg("name");
+  if (Scripts.isRunningFlow(name.c_str())) {
+    s_server.send(409, "application/json",
+                  "{\"ok\":false,\"message\":\"「" + jsonEscape(name) + "」正在执行,先停止再删除\"}");
+    return;
+  }
   if (Scripts.remove(name.c_str())) {
     LOGF("%s Web 删除脚本 %s", TAG, name.c_str());
     s_server.send(200, "application/json",
@@ -1021,6 +1030,11 @@ static void handleSystem() {
     delay(500);
     ESP.restart();
   } else if (op == "factory") {
+    if (Scripts.running()) {
+      s_server.send(409, "application/json",
+                    "{\"ok\":false,\"message\":\"有流程正在执行,先停止再恢复出厂\"}");
+      return;
+    }
     int n = Scripts.removeAll();
     LOGF("%s Web 请求恢复出厂,清空 %d 个脚本", TAG, n);
     s_server.send(200, "application/json",
@@ -1417,9 +1431,8 @@ static void hbSend() {
   }
   // 最近要执行的脚本(大麦那种定时是 App 管的,板子只报"频率循环")
   if (s_schedActive) {
-    const Script *sc = Scripts.at(s_schedIndex);
-    if (sc) {
-      String nm; hbJsonEscape(nm, String(sc->name));
+    if (s_schedName[0]) {
+      String nm; hbJsonEscape(nm, String(s_schedName));
       body += "\"next\":{\"name\":\"" + nm + "\",\"at\":"
             + String((uint32_t)(millis() + (s_schedNextAt - millis()))) + "},";
     }
@@ -1710,7 +1723,12 @@ void netServiceScripts() {
     }
     if ((int32_t)(millis() - s_schedNextAt) >= 0) {
       s_schedNextAt = millis() + s_schedIntervalMs;
-      const Script *sc = Scripts.at(s_schedIndex);
+      int idx = Scripts.indexOf(s_schedName);
+      if (idx >= 0) s_schedIndex = (uint8_t)idx;
+      const Script *sc = (idx >= 0) ? Scripts.at(s_schedIndex) : nullptr;
+      if (sc == nullptr) {
+        LOGF("%s 定时循环的流程「%s」已不存在(被删除?),停止循环", TAG, s_schedName);
+      }
       if (sc) {
         s_state.running = true;
       // ⚠️⚠️ 灯必须在这里点亮,不能靠主循环"轮询 isRunning()" ——
