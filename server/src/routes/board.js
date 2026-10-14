@@ -249,11 +249,13 @@ router.post('/api/v1/board/heartbeat', needBoard, async (req, res) => {
     const fw = await applyBoardReport(b, mac, pubIp, true);
 
     // 板子这次没带流程列表(它认为没变),但服务器这边一条都没有
-    // (库是新的 / 板子被从看板删过)⇒ 让板子下次心跳带上全量
+    // (库是新的 / 板子被从看板删过),或者有留底内容是 NULL
+    // (旧版服务端收到 App 只带名字的代报时写成的)⇒ 让板子下次心跳带上全量
     let needFlows = false;
     if (!Array.isArray(b.flowNames) && (b.flows || 0) > 0) {
-      const c = await db.one('SELECT COUNT(*) AS n FROM board_flows WHERE mac = ?', [mac]);
-      needFlows = !c || Number(c.n) === 0;
+      const c = await db.one(
+        'SELECT COUNT(*) AS n, SUM(text IS NULL) AS nulls FROM board_flows WHERE mac = ?', [mac]);
+      needFlows = !c || Number(c.n) === 0 || Number(c.nulls) > 0;
     }
 
     // ⚠️ **这是唯一的"服务器 → 板子"下行通道**。

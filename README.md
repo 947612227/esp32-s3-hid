@@ -430,8 +430,14 @@ Z 0.5 0.5 0.55 0.20 300          # 以中心为轴捏合
 | 按键 | `K usage` | USB HID usage,如 `K 41`=BACK、`K 74`=Home |
 | 多媒体 | `V usage` | 如 `V 233`=音量+ |
 | 等待 | `wait ms` | 暂停 |
-| 重复 | `repeat n` | **把其后所有步骤整体重复 n 次** |
+| 重复 | `repeat n` … `endloop` | 把两者之间的步骤重复 n 次(1~65535),**必须成对**,可嵌套;缺一个保存时就报错 |
+| 跳出 | `break [备注]` | 立即跳出最内层 `repeat` 循环(写在循环外保存时报错) |
+| 通知 | `notify 消息` | 往控制中心报一个事件(整行都是消息) |
 | 跳转 | `goto label` | 跳到 `#label` 所在位置 |
+
+> 上限:每个流程最多 **128 步**(`ifpage`/`else`/`endif`/`endloop` 每个都算一步,标号和注释不算),
+> 板子最多存 **32 个流程**(没有 PSRAM 的板子只有 4 个);每个流程标号、`goto` 各最多 16 个。
+> 超出都会在保存时报错,不会静默截断或丢弃。
 
 > 所有指令都支持**末尾加备注**,例如 `wait 1500 等加载`、`H 0.5 0.5 900 长按菜单`。
 
@@ -466,7 +472,8 @@ wait 500
 goto start        # 跳回标号,形成循环
 ```
 
-> ⚠️ `goto` 有执行次数保护(1024 步),写错死循环会把板子卡住几秒然后报错退出。
+> ⚠️ 有死循环保护:**连续 2000 步都没有点击 / 等待 / 通知**(只在 goto、判断之间空转)就报错退出。
+> 正常的长循环(比如 `repeat 300` 里点点点)不受影响,随时可以「停止」。
 
 ### 串口命令
 
@@ -779,7 +786,7 @@ ESP32-S3 ──USB HID──> 手机
 | 配对成功但设备不出现 | Report Reference Descriptor 缺失或 Report ID 对不上 | 每个 Input Report 必须有 `0x2908`,值 = [Report ID, 0x01] |
 | 能点击但滑不动 | 同上,或连接间隔太大 | 固件请求 7.5~15ms;检查手机蓝牙设置里该设备的连接状态 |
 | 重新烧录固件后连不上 | 旧的 bonding 信息不匹配 | 手机端**先删除配对**再重新配对 |
-| 只有部分手势生效 | 报文字节数与 Report Map 声明不符 | 触摸报文必须是 42 字节 |
+| 只有部分手势生效 | 报文字节数与 Report Map 声明不符 | 触摸报文载荷必须是 60 字节(10 个触点 × 6 字节),BLE 发送时前面再加 1 字节 Report ID |
 
 ### 8.5 架构相关
 
@@ -833,11 +840,13 @@ esp32s3-hid-touch/
 ├── src/
 │   ├── common/                   # ★ 两种传输共用
 │   │   ├── hid_transport.h       #  传输后端抽象接口(HidTransport)
+│   │   ├── touch_limits.h        #  触点数 / 逻辑坐标范围(纯常量,解析器也用)
 │   │   ├── hid_report_map.h      #  ★ Report Map + 报文结构体(核心)
 │   │   ├── hid_touch.h           #  手势引擎接口
 │   │   ├── hid_touch.cpp         #  手势引擎实现(插值/贝塞尔/双指)
 │   │   ├── script_engine.h       #  ★ 脚本引擎接口
-│   │   ├── script_engine.cpp     #  解析 + LittleFS 存储 + 执行
+│   │   ├── script_parser.cpp     #  流程文本解析(纯 C++,tests/native 在电脑上测它)
+│   │   ├── script_engine.cpp     #  LittleFS 存储 + 执行
 │   │   ├── net_manager.h         #  WiFi + Web 管理接口
 │   │   ├── net_manager.cpp       #  WiFi 连接 + HTTP 服务 + 内嵌网页
 │   │   └── main.cpp              #  串口命令协议 + 脚本命令 + 自检

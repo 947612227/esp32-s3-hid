@@ -197,12 +197,17 @@ bool ScriptEngine::parse(const char *text, Script &out, char *errBuf,
         }
       }
       if (isLabel && strncmp(name, "if", 2) != 0 && strncmp(name, "end", 3) != 0) {
-        if (labelCount < MAX_LABELS) {
-          strncpy(labels[labelCount], name, SCRIPT_NAME_LEN - 1);
-          labels[labelCount][SCRIPT_NAME_LEN - 1] = '\0';
-          labelStep[labelCount] = out.stepCount;
-          labelCount++;
+        // 超了要报错:以前静默丢掉,跳过去才报"找不到标号",看不出是名额满了
+        if (labelCount >= MAX_LABELS) {
+          scriptSetErr(errBuf, errLen, "第 %u 行:标号太多(每个流程最多 %u 个)",
+                       lineNo, (unsigned)MAX_LABELS);
+          failed = true;
+          break;
         }
+        strncpy(labels[labelCount], name, SCRIPT_NAME_LEN - 1);
+        labels[labelCount][SCRIPT_NAME_LEN - 1] = '\0';
+        labelStep[labelCount] = out.stepCount;
+        labelCount++;
       }
       continue;   // 注释/标号都不产生步骤
     }
@@ -392,12 +397,12 @@ bool ScriptEngine::parse(const char *text, Script &out, char *errBuf,
       //    "# (goto 跳转到第 N 步)" 这种注释 ⇒ **一编辑流程 goto 就全丢了**
       //    (实测:带 goto 的流程读回来变成一堆注释,标号也不见了)。
       utf8Truncate(st.note, tok[1], sizeof(st.note));
-      if (pendingCount < MAX_GOTO) {
-        pending[pendingCount].step = out.stepCount;
-        strncpy(pending[pendingCount].label, tok[1], SCRIPT_NAME_LEN - 1);
-        pending[pendingCount].label[SCRIPT_NAME_LEN - 1] = '\0';
-        pendingCount++;
-      }
+      // ⚠️ 超了必须报错:以前不登记,回填不到,next 停在 0 ⇒ 这个 goto 会**静默跳到第 1 步**
+      if (pendingCount >= MAX_GOTO) { fail("goto 太多(每个流程最多 16 个)", "goto label"); break; }
+      pending[pendingCount].step = out.stepCount;
+      strncpy(pending[pendingCount].label, tok[1], SCRIPT_NAME_LEN - 1);
+      pending[pendingCount].label[SCRIPT_NAME_LEN - 1] = '\0';
+      pendingCount++;
 
     } else {
       fail("未知指令", "T/D/H/S/C/P/Z/K/V/wait/repeat/goto");

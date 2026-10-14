@@ -180,13 +180,21 @@ static void 标号和注释() {
   Parsed bad("wait 1\ngoto 无此标号");
   CHECK(!bad.ok && bad.errHas("找不到标号 '#无此标号'"));
 
-  // 上限 16 个标号:第 17 个被丢掉,跳过去会报找不到(记录现状)
+  // 标号上限 16 个:第 17 个直接报错(以前静默丢掉)
   std::string m;
-  for (int i = 0; i < 17; i++) m += "#L" + std::to_string(i) + "\nwait 1\n";
+  for (int i = 0; i < 16; i++) m += "#L" + std::to_string(i) + "\nwait 1\n";
   Parsed ok16((m + "goto L15").c_str());
   CHECK(ok16.ok);
-  Parsed lost((m + "goto L16").c_str());
-  CHECK(!lost.ok && lost.errHas("找不到标号"));
+  Parsed lab17((m + "#L16\nwait 1").c_str());
+  CHECK(!lab17.ok && lab17.errHas("标号太多") && lab17.errHas("第 33 行"));
+
+  // goto 上限 16 个:第 17 个报错(以前不登记 ⇒ 静默跳到第 1 步)
+  std::string g = "wait 1\n#尾\nwait 1\n";
+  for (int i = 0; i < 16; i++) g += "goto 尾\n";
+  Parsed g16(g.c_str());
+  CHECK(g16.ok && g16.at(17).op == StepOp::Goto && g16.at(17).next == 1);
+  Parsed g17((g + "goto 尾").c_str());
+  CHECK(!g17.ok && g17.errHas("goto 太多"));
 }
 
 static void 错误提示带行号() {

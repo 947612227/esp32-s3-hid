@@ -9,7 +9,7 @@
 #    2. 改一条 / 删一条 / 加一条:只动对应行,历史正确
 #    3. 心跳不带 flowNames(新固件"流程未变"):两个服务端都不动留底  ← 新固件兼容旧服务端
 #    4. App 代报只带名字不带内容:新服务端保留旧内容(旧服务端会被写成 NULL,作反向对照)
-#    5. 服务器没有该板子的流程、板子又没带 ⇒ 响应 needFlows:true
+#    5. 服务器没有该板子的流程、或有留底内容是 NULL,板子又没带 ⇒ 响应 needFlows:true
 #
 #  用法(仓库根目录): bash tests/server/test_flow_sync.sh [旧版本 git 引用,默认 d4b105c]
 #  ⚠️ bash 变量名只能用 ASCII,所以变量是英文 + 中文注释
@@ -156,6 +156,19 @@ run_cases() {   # $1 = 标签(新/旧)
   fi
 
   if [ "$label" = 新 ]; then
+    # 模拟正式库现状:留底行还在,但内容被旧服务端写成了 NULL
+    tmysql "$DB" -e "UPDATE board_flows SET text = NULL WHERE mac='$MAC' AND name='C'"
+    hb "$NO_FLOWS"
+    grep -q '"needFlows":true' "$TMP/resp" && pass "有留底内容是 NULL ⇒ needFlows:true" \
+      || fail "响应:$(head -c 200 "$TMP/resp")"
+    # 板子按要求带全量后,NULL 被补回,needFlows 恢复 false
+    hb "$DEL_B_ADD_D"
+    [ "$(flows_dump)" = "A=wait 111 C=wait 300 D=wait 400 " ] && pass "全量上报后 NULL 内容已补回" \
+      || fail "留底不对:$(flows_dump)"
+    hb "$NO_FLOWS"
+    grep -q '"needFlows":false' "$TMP/resp" && pass "补回后 ⇒ needFlows:false" \
+      || fail "响应:$(head -c 200 "$TMP/resp")"
+
     tmysql "$DB" -e "DELETE FROM board_flows WHERE mac='$MAC'"
     hb "$NO_FLOWS"
     grep -q '"needFlows":true' "$TMP/resp" && pass "服务器没有留底、板子没带 ⇒ needFlows:true" \
