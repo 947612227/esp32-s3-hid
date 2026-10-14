@@ -1027,15 +1027,43 @@ public class MainActivity extends Activity {
         fetchScripts();
     }
 
-    /** 强制重新从板子拉流程列表(「刷新列表」按钮用) */
+    /**
+     * 「刷新列表」按钮 —— **从服务器拉最新的,再同步到板子,然后显示**。
+     *
+     * ⚠️⚠️ 这里曾经做错(用户指出):
+     *      我第一版把「刷新列表」做成"重新读一遍**板子**"。
+     *      但流程是**存在服务器**上的(第 ⑥ 项就是为这个)——
+     *      服务器才是远程存储,板子只是**执行端**。
+     *      只读板子的话,服务器上新建的流程**永远下不来**。
+     *
+     *      正确的流向:
+     *        服务器(权威) ──拉下来──> App ──写进板子──> 板子(执行)
+     *                                     ↘ 同时更新本地状态
+     */
     private void refreshScripts() {
         if (scriptListBox == null) return;
         scriptsLoaded = false;
         scriptsDirty = false;
-        lastScriptsSig = "";            // 清掉签名,保证重绘一定发生
+        lastScriptsSig = "";
         scriptListBox.removeAllViews();
-        scriptListBox.addView(hint("读取中…"));
-        fetchScripts();
+        scriptListBox.addView(hint("正在从服务器拉取流程…"));
+
+        // ① 先从服务器拉全量
+        FlowSync.pull(this, board, true, new FlowSync.Cb() {
+            @Override public void done(final boolean ok, final String info) {
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        boardLog("刷新列表 → " + (ok ? info : ("服务器拉取失败:" + info)));
+                        // ② 再读板子(它现在应该已经有服务器那份了)
+                        scriptListBox.removeAllViews();
+                        scriptListBox.addView(hint("读取中…"));
+                        scriptsLoaded = false;
+                        lastScriptsSig = "";
+                        fetchScripts();
+                    }
+                });
+            }
+        });
     }
 
     /** 真正发请求读流程列表 */
@@ -2641,7 +2669,12 @@ public class MainActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
                         boardLog(ok ? ("流程同步完成:" + info) : ("流程同步失败:" + info));
-                        if (ok) { flowSyncDone = true; loadScripts(); }
+                        if (ok) {
+                            flowSyncDone = true;
+                            scriptsLoaded = false;     // 服务器可能带来了新流程
+                            lastScriptsSig = "";
+                            if (tab == TAB_SCRIPTS) loadScripts();
+                        }
                     }
                 });
             }

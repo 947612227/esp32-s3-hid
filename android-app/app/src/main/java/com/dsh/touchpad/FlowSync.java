@@ -46,7 +46,22 @@ public class FlowSync {
      * @param board 板子(可以为 null —— 那就只更新本地,等板子连上再说)
      */
     public static void pull(final Activity act, final Board board, final Cb cb) {
-        final long since = lastVer(act);
+        pull(act, board, false, cb);
+    }
+
+    /**
+     * @param force true = **忽略本地版本号,拉全量**
+     *
+     *   ⚠️ 为什么需要 force:
+     *      「刷新列表」的语义是"我要看服务器上最新的流程"。
+     *      只拉增量的话,如果服务器上只是**改**了一条(mac 相同、ver 变大),
+     *      增量也拿得到;但如果本地版本号已经追平,增量就是空的,
+     *      用户点刷新会觉得"没反应"。
+     *      强制全量 = 一定把服务器的当前状态完整对一遍。
+     */
+    public static void pull(final Activity act, final Board board, final boolean force,
+                            final Cb cb) {
+        final long since = force ? 0 : lastVer(act);
         Server.fetchFlows(act, since, new Server.Cb() {
             @Override public void done(final boolean ok, final String body) {
                 if (!ok) { if (cb != null) cb.done(false, "拉取失败:" + body); return; }
