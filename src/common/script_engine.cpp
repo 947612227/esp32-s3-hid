@@ -62,8 +62,13 @@ static void idleWait(uint32_t ms) {
   uint32_t t0 = millis();
   while (millis() - t0 < ms) {
     if (s_idleHook) s_idleHook();
-    delay(5);
     if (Scripts.stopRequested()) return;      // 等待期间也能被「停止」打断
+    // ⚠️ 睡的时间不能超过剩余时间:以前固定 delay(5),
+    //    wait 1 实际要 ~6ms(实测 128 步 wait 1 用了 800ms),每个 wait 都多等最多 5ms
+    uint32_t el = millis() - t0;
+    if (el >= ms) break;
+    uint32_t left = ms - el;
+    delay(left < 5 ? left : 5);
   }
 }
 
