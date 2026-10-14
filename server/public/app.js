@@ -70,10 +70,10 @@
       const page    = ref('home');
       const errMsg  = ref('');
       const clock   = ref('');
-      const bootAt  = window.__BOOT_AT || 0;
-      const ver     = window.__VER__ || '—';
-      const built   = window.__BUILT__ || '—';
-      const ME      = window.__USER__ || null;
+      const bootAt  = window.TP_BOOT_AT || 0;
+      const ver     = window.TP_VER || '—';
+      const built   = window.TP_BUILT || '—';
+      const ME      = window.TP_USER || null;
 
       const menus = MENUS;
       const curTitle = computed(() => (menus.find(m => m.k === page.value) || {}).n || '主页');
@@ -177,6 +177,33 @@
           ? '?owner=' + encodeURIComponent(flowFilter.value) : ''));
         flows.value = d.flows || [];
         flowOwners.value = d.owners || [];
+      }
+
+      /** 流程状态:优先用 status 字段,老数据回退到 deleted */
+      function flowStatus(f) {
+        if (f.deleted) return 'deleted';
+        return f.status || 'enabled';
+      }
+      function flowStatusText(f) {
+        return { enabled: '启用', disabled: '禁用', deleted: '已删除' }[flowStatus(f)] || '—';
+      }
+      function flowStatusClass(f) {
+        return flowStatus(f) === 'enabled' ? 'on' : 'off';
+      }
+
+      /** 改流程状态(启用 / 禁用 / 删除) */
+      async function setFlowStatus(owner, name, status) {
+        const label = { enabled: '启用', disabled: '禁用', deleted: '删除' }[status] || status;
+        if (status !== 'enabled' && !confirm(`把「${name}」设为「${label}」?\n\n`
+            + (status === 'disabled'
+                ? '禁用后客户端**拉不到**它,板子上那份会被移除(服务器保留记录)。'
+                : '删除后客户端也会移除它。'))) return;
+        await api('/api/admin/flows/status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ owner, name, status }),
+        }).catch(e => { alert('失败:' + e.message); throw e; });
+        await loadFlows();
       }
 
       async function loadStats() {
@@ -411,6 +438,7 @@
         // 方法
         go, loadAll, loadPage, loadBoards, loadPhones, loadApk, loadFw,
         loadUsers, loadStats, loadEvents, loadAudit, loadSummary, loadFlows,
+        setFlowStatus, flowStatus, flowStatusText, flowStatusClass,
         fireLed, showBoard, showFlows, setPolicy, savePolicy, openLed,
         uploadApk, uploadFw, delFw,
         addUser, chpw, toggleUser, delUser,

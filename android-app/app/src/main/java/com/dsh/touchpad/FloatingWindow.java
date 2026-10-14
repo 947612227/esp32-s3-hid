@@ -60,6 +60,12 @@ public class FloatingWindow {
     private View panelRoot;
     private WindowManager.LayoutParams panelLp;
     private TextView timeView, appView, logView, pickView, schedView;
+    /** 日志那块的可滚动容器 —— 默认收起(用户要求:启动后别占屏) */
+    private ScrollView logScroll;
+    /** 把柄上的「📜」按钮,用来展开/收起日志 */
+    private TextView logBtnRef;
+    /** 日志当前是否展开。默认 false = 收起 */
+    private boolean logOpen = false;
     private TextView freqView;   // 频率(间隔 + 连续时长)运行状态
     private final StringBuilder logBuf = new StringBuilder();
 
@@ -224,10 +230,14 @@ public class FloatingWindow {
         logView.setTextColor(C_DIM);
         logView.setTextSize(10);
         logView.setTypeface(android.graphics.Typeface.MONOSPACE);
-        ScrollView sc = new ScrollView(ctx);
-        sc.addView(logView);
-        panel.addView(sc, new LinearLayout.LayoutParams(
+        logScroll = new ScrollView(ctx);
+        logScroll.addView(logView);
+        panel.addView(logScroll, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(PANEL_H_DP - 50)));
+        // ⚠️ **默认收起** —— 用户实测反馈:"app 启动后默认收起悬浮窗的日志"。
+        //    日志区很高(PANEL_H_DP-50),一上来就把屏幕占掉一大块,
+        //    而大多数时候用户只关心"时间 / 目标 App / 运行状态"。
+        logScroll.setVisibility(View.GONE);
 
         panelRoot = panel;
 
@@ -294,6 +304,14 @@ public class FloatingWindow {
         });
         collapseBtnRef = collapse;
         box.addView(collapse);
+
+        // ⑥ 展开/收起**日志**(默认收起 —— 用户要求)
+        final TextView logBtn = mkHandleBtn("📜", 0xCC57606a);
+        logBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { toggleLog(); }
+        });
+        logBtnRef = logBtn;
+        box.addView(logBtn);
 
         handleRoot = box;
         // ⚠️ 拖动监听必须挂在**拖柄本身**上。
@@ -664,6 +682,7 @@ public class FloatingWindow {
         if (yieldBtnRef != null) yieldBtnRef.setVisibility(View.GONE);
         if (pickBtnRef != null) pickBtnRef.setVisibility(View.GONE);
         if (copyBtnRef != null) copyBtnRef.setVisibility(View.GONE);
+        if (logBtnRef != null) logBtnRef.setVisibility(View.GONE);
         handleText.setText("📋");
         handleText.setTextSize(16);
         handleText.setLayoutParams(new LinearLayout.LayoutParams(dp(BALL_DP), dp(BALL_DP)));
@@ -675,6 +694,15 @@ public class FloatingWindow {
     }
 
     /** 展开:4 个按钮回来,面板贴着把柄出现 */
+    /** 展开/收起日志那块(默认收起) */
+    public void toggleLog() {
+        logOpen = !logOpen;
+        if (logScroll != null) {
+            logScroll.setVisibility(logOpen ? View.VISIBLE : View.GONE);
+        }
+        update();
+    }
+
     public void expand() {
         if (!showing) return;
         collapsed = false;
@@ -683,6 +711,7 @@ public class FloatingWindow {
         if (yieldBtnRef != null) yieldBtnRef.setVisibility(View.VISIBLE);
         if (pickBtnRef != null) pickBtnRef.setVisibility(View.VISIBLE);
         if (copyBtnRef != null) copyBtnRef.setVisibility(View.VISIBLE);
+        if (logBtnRef != null) logBtnRef.setVisibility(View.VISIBLE);
         handleText.setText("⠿");
         handleText.setTextSize(15);
         handleText.setLayoutParams(new LinearLayout.LayoutParams(

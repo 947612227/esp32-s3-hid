@@ -658,20 +658,29 @@ app.get('/api/v1/app/flows', needApp, async (req, res) => {
     const ver = mx ? Number(mx.v) : 0;
 
     // since=0 表示"全量"(第一次装/清过数据)
+    const FIELDS = 'name, text, meta, ver, deleted, status, updated_at';
+    // ⚠️ 两种拉取的过滤**不一样**,别弄混:
+    //    · 全量(since=0):**只给 enabled** —— 禁用的流程不该出现在板子上。
+    //    · 增量(since>0):disabled/deleted **也要给** ——
+    //      否则客户端不知道"这条被禁用了",板子上那份会一直留着。
     const rows = since > 0
-      ? await db.q(`SELECT name, text, meta, ver, deleted, updated_at
-                    FROM flows WHERE owner = ? AND ver > ? ORDER BY ver`, [owner, since])
-      : await db.q(`SELECT name, text, meta, ver, deleted, updated_at
-                    FROM flows WHERE owner = ? AND deleted = 0 ORDER BY name`, [owner]);
+      ? await db.q(`SELECT ${FIELDS} FROM flows
+                    WHERE owner = ? AND ver > ? ORDER BY ver`, [owner, since])
+      : await db.q(`SELECT ${FIELDS} FROM flows
+                    WHERE owner = ? AND deleted = 0 AND status = 'enabled'
+                    ORDER BY name`, [owner]);
 
     json(res, 200, {
       ok: true, ver, full: since === 0,
       flows: rows.map(r => ({
         name: r.name,
-        text: r.text,
-        meta: r.meta,                       // mysql2 会把 JSON 列自动 parse
+        // ⚠️ 禁用的不下发**正文** —— 客户端拿到的是"这条被禁用了"的信号,
+        //    会把它从板子上移除,而不是继续执行。
+        text: (r.status === 'enabled' && !r.deleted) ? r.text : null,
+        meta: r.meta,
         ver: Number(r.ver),
-        deleted: !!r.deleted,
+        deleted: !!r.deleted || r.status === 'deleted',
+        status: r.status || 'enabled',
         updatedAt: r.updated_at,
       })),
     });
@@ -771,12 +780,36 @@ app.delete('/api/v1/app/flows/:name', needApp, async (req, res) => {
 });
 
 // ---- 后台看:某个 owner 的所有流程 ----
+/**
+ * 改某个流程的状态。
+ *   enabled  = 允许客户端下载(会下发正文)
+ *   disabled = 不允许下载(客户端把板子上那份移除,服务器保留记录)
+ *   deleted  = 删除(客户端也移除)
+ * ⚠️ 三种都要 **ver +1** —— 否则客户端拉增量看不到这次变更。
+ */
+app.post('/api/admin/flows/status', needLogin, needAdminRole, async (req, res) => {
+  const b = req.body || {};
+  const owner = String(b.owner || '').slice(0, 64);
+  const name = String(b.name || '').slice(0, 64);
+  const status = ['enabled', 'disabled', 'deleted'].includes(b.status) ? b.status : null;
+  if (!owner || !name) return json(res, 400, { ok: false, message: '缺少 owner 或 name' });
+  if (!status) return json(res, 400, { ok: false, message: 'status 只能是 enabled/disabled/deleted' });
+
+  const [mx] = await db.q('SELECT COALESCE(MAX(ver),0) AS v FROM flows WHERE owner = ?', [owner]);
+  const nextVer = Number(mx ? mx.v : 0) + 1;
+  await db.run(
+    'UPDATE flows SET status = ?, deleted = ?, ver = ? WHERE owner = ? AND name = ?',
+    [status, status === 'deleted' ? 1 : 0, nextVer, owner, name]);
+  await audit(req.user.id, 'flow_status', owner + '/' + name, status, clientIp(req));
+  json(res, 200, { ok: true, owner, name, status, ver: nextVer });
+});
+
 app.get('/api/admin/flows', needLogin, async (req, res) => {
   const owner = String(req.query.owner || '').slice(0, 64);
   const rows = owner
-    ? await db.q(`SELECT owner, name, LENGTH(text) AS size, ver, deleted, updated_at
+    ? await db.q(`SELECT owner, name, LENGTH(text) AS size, ver, deleted, status, updated_at
                   FROM flows WHERE owner = ? ORDER BY name`, [owner])
-    : await db.q(`SELECT owner, name, LENGTH(text) AS size, ver, deleted, updated_at
+    : await db.q(`SELECT owner, name, LENGTH(text) AS size, ver, deleted, status, updated_at
                   FROM flows ORDER BY owner, name LIMIT 500`);
   const owners = await db.q(
     'SELECT owner, COUNT(*) AS n, MAX(updated_at) AS at FROM flows GROUP BY owner ORDER BY at DESC');

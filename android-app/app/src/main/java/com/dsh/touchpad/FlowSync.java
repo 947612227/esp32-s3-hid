@@ -80,7 +80,16 @@ public class FlowSync {
                                 JSONObject f = arr.getJSONObject(i);
                                 String name = f.optString("name");
                                 if (name.isEmpty()) continue;
-                                if (f.optBoolean("deleted", false)) {
+                                // ⚠️ **禁用 / 删除的都要从板子上移除** ——
+                                //    服务器用 status 控制"客户端能拉到哪些流程":
+                                //      enabled  → 下发正文,可以执行
+                                //      disabled → 不下发正文(服务器保留记录)
+                                //      deleted  → 连记录都删掉
+                                //    后两种在板子上都不该留着,否则会继续被执行。
+                                String status = f.optString("status", "enabled");
+                                if (f.optBoolean("deleted", false)
+                                        || "deleted".equals(status)
+                                        || "disabled".equals(status)) {
                                     store.remove(name);
                                     if (board != null) board.delete(name, null);
                                     removed++;

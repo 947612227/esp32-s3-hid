@@ -802,6 +802,17 @@ public class FlowEditActivity extends Activity {
             @Override public void done(boolean ok, String body) {
                 toast(Board.messageOf(body));
                 if (ok) {
+                    // ⚠️⚠️ **改名了必须把旧名字删掉**。
+                    //
+                    //   踩过的坑(用户实测):在编辑页把流程改个名字,保存后
+                    //   回到列表——**名字没变,还多出一条**。
+                    //   因为这里只做了"按新名字存一份",旧名字那份
+                    //   在板子/本地/服务器上**都还在**,成了幽灵流程。
+                    if (origName != null && !origName.isEmpty() && !origName.equals(n)) {
+                        board.delete(origName, null);              // 板子
+                        flows.remove(origName);                    // 本地元数据
+                        Server.deleteFlow(FlowEditActivity.this, origName, null);  // 服务器(软删)
+                    }
                     flows.put(draft);
                     // 顺手推给服务器(服务器是权威,详见 FlowSync 的注释)。
                     // ⚠️ baseVer=0 = 盲写:编辑页手里只有"当前草稿",没有服务器版本号。

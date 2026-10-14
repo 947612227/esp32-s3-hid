@@ -301,7 +301,12 @@
       <section v-show="page==='flows'">
         <h2>📄 流程管理 <span class="muted">{{ flows.length }} 条(服务器是权威)</span></h2>
         <div class="box" style="margin-bottom:14px">
-          <b>这里的流程 = 权威副本</b> ✅ App 启动时会拉增量写进本地和板子 ✅
+          <b>这里的流程 = 权威副本</b> ✅ App 启动/刷新时会拉下来写进板子 ✅
+          <br>
+          <b>状态控制客户端能拿到哪些</b>:
+          <span class="pill on">启用</span> 会下发正文 ✅
+          <span class="pill off">禁用</span> 不下发,客户端会把板子上那份移除 ✅
+          <span class="pill off">删除</span> 同样移除 ✅
           <br>
           <span class="muted">
             板子上也有一份(执行用),App 里有一份(状态用)。
@@ -322,17 +327,26 @@
 
         <table>
           <thead><tr><th>归属</th><th>流程名</th><th>大小</th><th>版本</th>
-            <th>状态</th><th>最后修改</th></tr></thead>
+            <th>状态</th><th>最后修改</th><th>操作</th></tr></thead>
           <tbody>
-            <tr v-if="!flows.length"><td colspan="6" class="muted">还没有流程</td></tr>
+            <tr v-if="!flows.length"><td colspan="7" class="muted">还没有流程</td></tr>
             <tr v-for="(f,i) in flows" :key="i">
               <td><span class="tag">{{ f.owner }}</span></td>
               <td><b>{{ f.name }}</b></td>
               <td>{{ f.size ? (f.size + ' 字节') : '—' }}</td>
               <td>v{{ f.ver }}</td>
-              <td><span class="pill" :class="f.deleted?'off':'on'">
-                {{ f.deleted ? '已删除' : '有效' }}</span></td>
+              <td>
+                <span class="pill" :class="flowStatusClass(f)">{{ flowStatusText(f) }}</span>
+              </td>
               <td>{{ fmtTime(f.updated_at) }}</td>
+              <td style="white-space:nowrap">
+                <button v-if="flowStatus(f) !== 'enabled'"
+                        @click="setFlowStatus(f.owner, f.name, 'enabled')">✅ 启用</button>
+                <button v-if="flowStatus(f) !== 'disabled'"
+                        @click="setFlowStatus(f.owner, f.name, 'disabled')">🚫 禁用</button>
+                <button v-if="flowStatus(f) !== 'deleted'"
+                        @click="setFlowStatus(f.owner, f.name, 'deleted')">🗑 删除</button>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -616,10 +630,18 @@
 
 <script>
   // 服务端注入的变量(见 index.js 的 /admin/ 路由)
-  window.__BOOT_AT = __BOOT_AT__;
-  window.__VER__    = "__VER__";
-  window.__BUILT__  = "__BUILT__";
-  window.__USER__   = __USER__;
+  //
+  // ⚠️⚠️ 变量名**绝对不能**叫 window.__VER__ 这种 ——
+  //      服务端做的是全文 split('__VER__').join(版本号),
+  //      变量名里含占位符就会被一起替换掉,变成
+  //          window.1.0 = "1.0";          ← 语法错误!
+  //      后果:整个内联 script 解析失败 ⇒ window.__VER__ 等全都不存在
+  //      ⇒ 后台左上角一直显示 "管理后台 v—"(实测踩过)。
+  //      所以:**变量名和占位符必须错开** ✅
+  window.TP_BOOT_AT = __BOOT_AT__;
+  window.TP_VER     = "__VER__";
+  window.TP_BUILT   = "__BUILT__";
+  window.TP_USER    = __USER__;
 </script>
 <script src="/admin/static/vendor/vue.global.prod.js"></script>
 <script src="/admin/static/app.js"></script>

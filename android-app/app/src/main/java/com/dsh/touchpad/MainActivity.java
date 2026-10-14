@@ -1045,21 +1045,27 @@ public class MainActivity extends Activity {
         scriptsLoaded = false;
         scriptsDirty = false;
         lastScriptsSig = "";
-        scriptListBox.removeAllViews();
-        scriptListBox.addView(hint("正在从服务器拉取流程…"));
+        // ⚠️⚠️ **不要阻塞界面等服务器**(用户实测:"大概率卡在
+        //    正在从服务器拉取流程 → 读取中 → 还没有流程")。
+        //
+        //    原因:原来把界面清空、写"正在从服务器拉取…",然后**等**服务器拉完
+        //    再读板子。蓝牙 + 服务器两段路都很慢(可能十几秒),
+        //    期间界面一片空白;一旦中间哪步失败就停在"还没有流程"上。
+        //
+        //    改成:**先把现有的列表照常显示出来,服务器同步放到后台做**,
+        //    同步完了再静默刷新一次。用户点刷新立刻有反馈,不用干等。
+        lastScriptsSig = "";
+        fetchScripts();                     // ① 立刻显示板子上现有的
 
-        // ① 先从服务器拉全量
+        // ② 后台从服务器拉全量,拉完再静默刷一次
         FlowSync.pull(this, board, true, new FlowSync.Cb() {
             @Override public void done(final boolean ok, final String info) {
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
                         boardLog("刷新列表 → " + (ok ? info : ("服务器拉取失败:" + info)));
-                        // ② 再读板子(它现在应该已经有服务器那份了)
-                        scriptListBox.removeAllViews();
-                        scriptListBox.addView(hint("读取中…"));
                         scriptsLoaded = false;
                         lastScriptsSig = "";
-                        fetchScripts();
+                        if (tab == TAB_SCRIPTS) fetchScripts();
                     }
                 });
             }
