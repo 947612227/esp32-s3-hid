@@ -68,8 +68,15 @@ void setState(int state);
 /** 老接口,等价于 setState()。保留是为了不破坏已有调用 */
 void setStateColor(int state);
 
-/** 流程执行结束 —— 亮绿色几秒再回待机 */
-void finished();
+/** 流程开始 —— 取消上一轮未结束的绿色,直接变黄 */
+void runStarted();
+
+/**
+ * 流程执行结束 —— 亮绿色几秒再回待机。
+ * @param runStartMs 流程开始时刻(millis)。传了的话,黄色不足 5 秒会先保持黄、
+ *                   到点再变绿 —— 由 tick() 完成,**不阻塞**调用方。0 = 立刻变绿。
+ */
+void finished(uint32_t runStartMs = 0);
 
 /**
  * 四色轮播自检:红 → 黄 → 绿 → 灭,每个 1.5 秒,走完自动回"自动"模式。

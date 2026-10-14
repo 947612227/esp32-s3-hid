@@ -14,6 +14,8 @@ namespace Led {
 
 static uint8_t  s_r = 0, s_g = 0, s_b = 0;
 static uint32_t s_holdUntil = 0;      // 0 = 不限时
+static uint32_t s_doneAt = 0;         // >0 = 到这个时刻再切"执行结束"绿(短流程补足黄色用)
+static const uint32_t MIN_RUNNING_MS = 5000;  // "运行中"黄至少亮这么久,否则一闪而过看不见
 static bool     s_identify = false;
 static uint32_t s_identifyUntil = 0;
 static int      s_state = 0;
@@ -53,6 +55,7 @@ void begin() {
 }
 
 void set(uint8_t r, uint8_t g, uint8_t b, uint32_t holdMs) {
+  s_doneAt = 0;                          // 手动设色优先,取消待切的"结束绿"
   s_identify = false;
   s_manual = true;                       // 手动接管,状态色不许盖
   write(r, g, b);
@@ -62,6 +65,7 @@ void set(uint8_t r, uint8_t g, uint8_t b, uint32_t holdMs) {
 void off() { set(0, 0, 0, 0); }
 
 void autoMode() {
+  s_doneAt = 0;
   s_manual = false;
   s_identify = false;
   s_holdUntil = 0;
@@ -91,6 +95,7 @@ void identify() {
   }
   // 最后常亮绿色
   write(0, 200, 0);
+  s_doneAt = 0;
   s_identify = true;
   s_identifyUntil = millis() + 60000;   // 亮 60 秒后回到状态色
   s_holdUntil = 0;
@@ -131,6 +136,7 @@ void setState(int state) {
 void setStateColor(int state) { setState(state); }
 
 void colorTest() {
+  s_doneAt = 0;
   s_test = true;
   s_testStep = 0;
   s_testNextAt = 0;          // 立刻亮第一个色
@@ -140,18 +146,46 @@ void colorTest() {
 
 bool testing() { return s_test; }
 
-void finished() {
+/** 亮"执行结束"绿 5 秒,然后 tick() 会自动回待机 */
+static void showDone(uint32_t now) {
   Serial.println(F("[led] 执行结束 → 绿 5 秒"));
-  // 绿 5 秒,然后 tick() 会自动回待机
   s_identify = false;
   s_manual = false;
   write(0, 60, 0);
   s_state = ST_DONE;
-  s_holdUntil = millis() + 5000;
+  s_holdUntil = now + 5000;
+}
+
+void runStarted() {
+  // 新流程开始:取消上一轮还没亮的绿 / 还在亮的绿,直接变黄
+  s_doneAt = 0;
+  if (!s_manual && !s_test && !s_identify) s_holdUntil = 0;
+  setState(ST_RUNNING);
+}
+
+void finished(uint32_t runStartMs) {
+  uint32_t now = millis();
+  uint32_t yellowEnd = runStartMs + MIN_RUNNING_MS;
+  if (runStartMs != 0 && (int32_t)(yellowEnd - now) > 0) {
+    // 流程太短:黄色还没亮满,先保持黄,到点由 tick() 切绿(不阻塞调用方)
+    Serial.printf("[led] 执行结束,黄色再保持 %lu ms 后变绿\n",
+                  (unsigned long)(yellowEnd - now));
+    s_doneAt = yellowEnd;
+    s_holdUntil = yellowEnd;     // 保持期内状态色不许盖掉黄
+    return;
+  }
+  showDone(now);
 }
 
 void tick() {
   uint32_t now = millis();
+
+  // ---- 短流程补足的黄色到点 → 切绿 ----
+  if (s_doneAt && (int32_t)(now - s_doneAt) >= 0) {
+    s_doneAt = 0;
+    if (!s_test) showDone(now);
+    return;
+  }
 
   // ---- 四色轮播自检(优先级最高,期间别的都不许改灯)----
   if (s_test) {
