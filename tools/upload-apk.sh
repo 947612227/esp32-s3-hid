@@ -52,11 +52,16 @@ curl -s -c "$COOKIE" -X POST "$SERVER/admin/login" \
 if ! grep -q tp_sess "$COOKIE"; then echo "❌ 登录失败(账号密码错?服务器不在?)"; exit 1; fi
 
 # ---- 3. 看服务器上现在是什么版本 ----
+# ⚠️ 列表接口返回的是 versionCode / versionName / createdAt(毫秒),不是数据库列名
 CUR=$(curl -s -b "$COOKIE" "$SERVER/api/admin/apk" | python3 -c "
-import sys, json
+import sys, json, time
 try:
     l = json.load(sys.stdin).get('list', [])
-    print(f\"{l[0]['version_code']}|{l[0]['version_name']}|{l[0]['created_at'][:19]}\" if l else '0|(无)|')
+    if l:
+        at = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(l[0]['createdAt'] / 1000))
+        print(f\"{l[0]['versionCode']}|{l[0]['versionName']}|{at}\")
+    else:
+        print('0|(无)|')
 except Exception:
     print('?|?|')")
 echo "  服务器上: $CUR"
