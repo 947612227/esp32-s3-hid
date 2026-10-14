@@ -1185,14 +1185,32 @@ public class MainActivity extends Activity {
         });
     }
 
+    /** 读列表失败/读回空时的重试次数 */
+    private int scriptsRetry = 0;
+
     /** 真正发请求读流程列表 */
     private void fetchScripts() {
         if (scriptListBox == null) return;
         board.scripts(new Board.Cb() {
             @Override public void done(boolean ok, String body) {
                 if (!ok) {
-                    scriptListBox.removeAllViews();
-                    scriptListBox.addView(hint("读取失败:" + body));
+                    // ⚠️⚠️ **不要因为一次失败就把列表清空** ——
+                    //    实测蓝牙读列表偶尔会丢响应(读回 0 条 / 超时),
+                    //    原来一失败就 removeAllViews + "读取失败",
+                    //    用户看到的就是"列表空了"。
+                    //    现在:保留已经显示的内容,然后**重试**。
+                    if (scriptsRetry < 3) {
+                        scriptsRetry++;
+                        boardLog("读流程列表失败,重试 " + scriptsRetry + "/3");
+                        ui.postDelayed(new Runnable() {
+                            @Override public void run() { fetchScripts(); }
+                        }, 1200);
+                        return;
+                    }
+                    scriptsRetry = 0;
+                    if (scriptListBox.getChildCount() == 0) {
+                        scriptListBox.addView(hint("读取失败:" + body));
+                    }
                     return;
                 }
                 try {
@@ -1206,6 +1224,16 @@ public class MainActivity extends Activity {
                 }
                 // 只在数据真的变了才重绘,避免按钮位置跳动
                 // (重绘瞬间按下会把点击套到另一个按钮上,实测踩过)
+                // 读回 0 条也可能是**响应丢了**,重试几次再说
+                if (scripts.length() == 0 && scriptsRetry < 3) {
+                    scriptsRetry++;
+                    boardLog("读回 0 条,重试 " + scriptsRetry + "/3");
+                    ui.postDelayed(new Runnable() {
+                        @Override public void run() { fetchScripts(); }
+                    }, 1200);
+                    return;
+                }
+                scriptsRetry = 0;
                 scriptsLoaded = true;        // 缓存有效了
                 String sig = body.length() + ":" + body.hashCode();
                 if (!sig.equals(lastScriptsSig)) {
