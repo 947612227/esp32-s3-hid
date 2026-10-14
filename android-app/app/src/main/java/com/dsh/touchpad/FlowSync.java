@@ -81,17 +81,31 @@ public class FlowSync {
      */
     public static void pull(final Activity act, final Board board, final boolean force,
                             final Cb cb) {
-        if (isBusy()) {
-            if (cb != null) cb.done(false, "正在同步中,请稍候");
-            return;
+        pull(act, board, force, true, cb);
+    }
+
+    /**
+     * @param holdBusy 是否占用 busy 防抖。
+     *   ⚠️ **启动时的自动同步必须传 false** —— 它会在后台跑,
+     *      而且板子忙的时候某个回调可能永远不回来 ⇒ 如果它占了 busy,
+     *      用户点「同步服务器」会被"正在同步中"挡住,以为按钮坏了。
+     *      (这个坑我踩了三次:refreshing 泄漏 / busy 泄漏 / 现在这个)
+     */
+    public static void pull(final Activity act, final Board board, final boolean force,
+                            final boolean holdBusy, final Cb cb) {
+        if (holdBusy) {
+            if (isBusy()) {
+                if (cb != null) cb.done(false, "正在同步中,请稍候");
+                return;
+            }
+            begin();
         }
-        begin();
         final long since = force ? 0 : lastVer(act);
 
         Server.fetchFlows(act, since, new Server.Cb() {
             @Override public void done(final boolean ok, final String body) {
                 if (!ok) {
-                    end();
+                    if (holdBusy) end();
                     if (cb != null) cb.done(false, "拉取失败:" + body);
                     return;
                 }
@@ -131,11 +145,11 @@ public class FlowSync {
                                 @Override public void done(java.util.List<String> onBoard) {
                                     // 串行写(板子慢,一次全丢出去会全超时)
                                     writeOne(act, board, toWrite, 0, 0, 0, ver, since,
-                                            onBoard, serverNames, cb);
+                                            onBoard, serverNames, cb, holdBusy);
                                 }
                             });
                         } catch (Throwable t) {
-                            end();
+                            if (holdBusy) end();
                             if (cb != null) cb.done(false, "解析失败:" + t.getMessage());
                         }
                     }
@@ -171,10 +185,10 @@ public class FlowSync {
                                  final long since,
                                  final java.util.List<String> onBoard,
                                  final java.util.List<String> serverNames,
-                                 final Cb cb) {
+                                 final Cb cb, final boolean holdBusy) {
         if (board == null || i >= list.size()) {
             setLastVer(act, ver);
-            end();
+            if (holdBusy) end();
             // ⚠️ 算"板子上有、服务器没有"的那些 —— 由**调用方弹窗确认后**再删
             final java.util.List<String> extra = new java.util.ArrayList<>();
             for (String n : onBoard) if (!serverNames.contains(n)) extra.add(n);
@@ -192,7 +206,7 @@ public class FlowSync {
                     @Override public void run() {
                         writeOne(act, board, list, i + 1,
                                 okN + (ok ? 1 : 0), failN + (ok ? 0 : 1),
-                                ver, since, onBoard, serverNames, cb);
+                                ver, since, onBoard, serverNames, cb, holdBusy);
                     }
                 });
             }

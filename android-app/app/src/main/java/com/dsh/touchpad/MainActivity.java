@@ -2783,13 +2783,15 @@ public class MainActivity extends Activity {
         long now = System.currentTimeMillis();
         if (now - flowSyncTryAt < 60000) return;
         flowSyncTryAt = now;
-        FlowSync.pull(this, board, false, new FlowSync.Cb() {
+        FlowSync.pull(this, board, false, false /* 不占 busy */, new FlowSync.Cb() {
             @Override public void done(final boolean ok, final String info) {
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
                         boardLog(ok ? ("流程同步完成:" + info) : ("流程同步失败:" + info));
+                        flowSyncDone = true;    // ⚠️ 不管成功失败都只跑一次 ——
+                                                //    否则每 60 秒重试一次,而板子忙时
+                                                //    回调不回来会越堆越多
                         if (ok) {
-                            flowSyncDone = true;
                             scriptsLoaded = false;     // 服务器可能带来了新流程
                             lastScriptsSig = "";
                             if (tab == TAB_SCRIPTS) loadScripts();
