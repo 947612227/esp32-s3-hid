@@ -934,7 +934,16 @@ public class MainActivity extends Activity {
         }, new View.OnClickListener() {
             @Override public void onClick(View v) {
                 if ("new".equals(v.getTag())) newFlow();
-                else refreshScripts();      // 「刷新列表」= 强制重新请求
+                else refreshScripts();
+            }
+        }));
+        // 和服务器相关的两个操作单独一行(用户要求)
+        head.addView(btnRow(null, new String[][]{
+                {"⬆️ 上传流程", "up"}, {"🗑 清空本地流程", "clr"}
+        }, new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if ("up".equals(v.getTag())) uploadAllFlows();
+                else clearLocalFlows();
             }
         }));
         content.addView(head);
@@ -1040,6 +1049,46 @@ public class MainActivity extends Activity {
      *        服务器(权威) ──拉下来──> App ──写进板子──> 板子(执行)
      *                                     ↘ 同时更新本地状态
      */
+    /** 「⬆️ 上传流程」—— 把板子上**所有**流程传到服务器(同名覆盖、不同名新建) */
+    private void uploadAllFlows() {
+        toast("正在上传板子上的流程到服务器…");
+        FlowSync.uploadAll(this, board, new FlowSync.Cb() {
+            @Override public void done(final boolean ok, final String info) {
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        boardLog("上传流程 → " + info);
+                        toast(ok ? ("✅ " + info) : ("❌ " + info));
+                    }
+                });
+            }
+        });
+    }
+
+    /** 「🗑 清空本地流程」—— 删掉板子上所有流程(二次确认) */
+    private void clearLocalFlows() {
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("清空本地流程")
+                .setMessage("会删掉板子上所有流程,不可撤销。\n\n确认吗?")
+                .setPositiveButton("确认清空", new android.content.DialogInterface.OnClickListener() {
+                    @Override public void onClick(android.content.DialogInterface d, int w) {
+                        toast("正在清空…");
+                        FlowSync.clearBoard(MainActivity.this, board, new FlowSync.Cb() {
+                            @Override public void done(final boolean ok, final String info) {
+                                runOnUiThread(new Runnable() {
+                                    @Override public void run() {
+                                        boardLog("清空本地 → " + info);
+                                        toast(ok ? ("✅ " + info) : ("❌ " + info));
+                                        refreshScripts();
+                                    }
+                                });
+                            }
+                        });
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
     private void refreshScripts() {
         if (scriptListBox == null) return;
         scriptsLoaded = false;
@@ -2670,7 +2719,7 @@ public class MainActivity extends Activity {
         long now = System.currentTimeMillis();
         if (now - flowSyncTryAt < 60000) return;
         flowSyncTryAt = now;
-        FlowSync.pull(this, board, new FlowSync.Cb() {
+        FlowSync.pull(this, board, false, new FlowSync.Cb() {
             @Override public void done(final boolean ok, final String info) {
                 runOnUiThread(new Runnable() {
                     @Override public void run() {

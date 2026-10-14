@@ -802,23 +802,16 @@ public class FlowEditActivity extends Activity {
             @Override public void done(boolean ok, String body) {
                 toast(Board.messageOf(body));
                 if (ok) {
-                    // ⚠️⚠️ **改名了必须把旧名字删掉**。
-                    //
-                    //   踩过的坑(用户实测):在编辑页把流程改个名字,保存后
-                    //   回到列表——**名字没变,还多出一条**。
-                    //   因为这里只做了"按新名字存一份",旧名字那份
-                    //   在板子/本地/服务器上**都还在**,成了幽灵流程。
+                    // ⚠️ 改名了要把**板子上**的旧名字删掉,否则会留下幽灵流程
+                    //   (用户实测:"改了名字回到列表,名字没变还多出一条")
+                    //   ⚠️ 服务器上**不动** —— 按新规格,上传是手动的。
                     if (origName != null && !origName.isEmpty() && !origName.equals(n)) {
-                        board.delete(origName, null);              // 板子
-                        flows.remove(origName);                    // 本地元数据
-                        Server.deleteFlow(FlowEditActivity.this, origName, null);  // 服务器(软删)
+                        board.delete(origName, null);
+                        flows.remove(origName);
                     }
                     flows.put(draft);
-                    // 顺手推给服务器(服务器是权威,详见 FlowSync 的注释)。
-                    // ⚠️ baseVer=0 = 盲写:编辑页手里只有"当前草稿",没有服务器版本号。
-                    //    真冲突时服务器**保留它自己的版本**,下一次 pull 会把
-                    //    服务器的内容拉回来 —— 不会静默丢数据。
-                    FlowSync.push(FlowEditActivity.this, n, content, draft, 0, null);
+                    // ⚠️ 按用户新规格:**新建/改名不再自动上传服务器** ——
+                    //    上传要用流程页的「⬆️ 上传流程」按钮。
                     // ⚠️ 让流程列表的缓存作废 —— 否则回到主界面还显示旧列表
                     //    (用户刚存的流程看不到,得手动点「刷新列表」)
                     MainActivity.scriptsDirty = true;

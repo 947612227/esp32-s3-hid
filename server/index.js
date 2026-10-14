@@ -646,46 +646,37 @@ function flowOwner(req) {
   return o.slice(0, 64);
 }
 
-// ---- 拉增量:只返回比 since 新的 ----
+// ---- 拉取:返回**所有归属**中「启用」的流程 ----
+//
+//  ⚠️ 为什么不按 owner 过滤(用户明确要求):
+//      "客户端请求列表时,返回所有归属中启用的流程"。
+//      流程是**团队共享**的,不该按设备隔离 —— 换台手机也该看到同一批流程。
+//      所以 deviceId 只用于**上传**时标记归属,拉取时不参与过滤。
 app.get('/api/v1/app/flows', needApp, async (req, res) => {
   try {
-    const owner = flowOwner(req);
-    if (!owner) return json(res, 400, { ok: false, message: '缺少 deviceId' });
     const since = Math.max(Number(req.query.since) || 0, 0);
 
-    const [mx] = await db.q(
-      'SELECT COALESCE(MAX(ver),0) AS v FROM flows WHERE owner = ?', [owner]);
-    const ver = mx ? Number(mx.v) : 0;
+    // 只给"启用"的:禁用/删除的客户端**拿不到**,也就不用管
+    const rows = await db.q(
+      `SELECT owner, name, text, meta, ver, updated_at
+       FROM flows
+       WHERE deleted = 0 AND status = 'enabled'
+       ORDER BY ver`);
 
-    // since=0 表示"全量"(第一次装/清过数据)
-    const FIELDS = 'name, text, meta, ver, deleted, status, updated_at';
-    // ⚠️ 两种拉取的过滤**不一样**,别弄混:
-    //    · 全量(since=0):**只给 enabled** —— 禁用的流程不该出现在板子上。
-    //    · 增量(since>0):disabled/deleted **也要给** ——
-    //      否则客户端不知道"这条被禁用了",板子上那份会一直留着。
-    const rows = since > 0
-      ? await db.q(`SELECT ${FIELDS} FROM flows
-                    WHERE owner = ? AND ver > ? ORDER BY ver`, [owner, since])
-      : await db.q(`SELECT ${FIELDS} FROM flows
-                    WHERE owner = ? ORDER BY name`, [owner]);
-    // ⚠️⚠️ 全量**不再过滤 status** ——
-    //   原来只给 enabled,结果客户端"全量对齐"时发现自己列表里
-    //   服务器没给的流程(其实是别的来源的)就**全删了**,
-    //   实测把板子上 6 条 legacy 流程一起清掉了。
-    //   现在:disabled/deleted 也返回,**但 text=null**(见上面 map),
-    //   客户端据此只删"被明确标记的"那几条,其余不动。
+    const [mx] = await db.q(
+      `SELECT COALESCE(MAX(ver),0) AS v FROM flows WHERE deleted = 0 AND status = 'enabled'`);
+    const ver = mx ? Number(mx.v) : 0;
 
     json(res, 200, {
       ok: true, ver, full: since === 0,
       flows: rows.map(r => ({
+        owner: r.owner,
         name: r.name,
-        // ⚠️ 禁用的不下发**正文** —— 客户端拿到的是"这条被禁用了"的信号,
-        //    会把它从板子上移除,而不是继续执行。
-        text: (r.status === 'enabled' && !r.deleted) ? r.text : null,
+        text: r.text,
         meta: r.meta,
         ver: Number(r.ver),
-        deleted: !!r.deleted || r.status === 'deleted',
-        status: r.status || 'enabled',
+        deleted: false,
+        status: 'enabled',
         updatedAt: r.updated_at,
       })),
     });
