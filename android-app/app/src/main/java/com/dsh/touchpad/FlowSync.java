@@ -33,6 +33,15 @@ public class FlowSync {
     private static volatile boolean busy = false;
 
     public static boolean isBusy() { return busy; }
+
+    /**
+     * 上次同步发现「板子上有、服务器没有」的流程名。
+     *
+     * ⚠️ **不自动删除** —— 由界面弹窗列出来,用户确认后才删。
+     *    之前"默默按服务器状态删板子"的逻辑两次把板子清空过,
+     *    所以这里把决定权交给用户 ✅
+     */
+    public static volatile java.util.List<String> pendingExtra = new java.util.ArrayList<String>();
     private static void end()      { busy = false; }
 
     public interface Cb { void done(boolean ok, String info); }
@@ -99,8 +108,16 @@ public class FlowSync {
                                     toWrite.add(new String[]{name, text});
                                 }
                             }
-                            // 串行写(板子慢,一次全丢出去会全超时)
-                            writeOne(act, board, toWrite, 0, 0, 0, ver, since, cb);
+                            // 先把板子上现有的名字读出来 —— 调用方用它算"多余的"
+                            final java.util.List<String> serverNames = new java.util.ArrayList<>();
+                            for (String[] kv : toWrite) serverNames.add(kv[0]);
+                            boardScriptNames(act, board, new NamesCb() {
+                                @Override public void done(java.util.List<String> onBoard) {
+                                    // 串行写(板子慢,一次全丢出去会全超时)
+                                    writeOne(act, board, toWrite, 0, 0, 0, ver, since,
+                                            onBoard, serverNames, cb);
+                                }
+                            });
                         } catch (Throwable t) {
                             end();
                             if (cb != null) cb.done(false, "解析失败:" + t.getMessage());
@@ -111,16 +128,45 @@ public class FlowSync {
         });
     }
 
+    /** 读板子上的流程名列表 */
+    private interface NamesCb { void done(java.util.List<String> names); }
+    private static void boardScriptNames(Activity act, Board board, final NamesCb cb) {
+        if (board == null) { cb.done(new java.util.ArrayList<String>()); return; }
+        board.scripts(new Board.Cb() {
+            @Override public void done(boolean ok, String body) {
+                java.util.List<String> out = new java.util.ArrayList<>();
+                if (ok) {
+                    try {
+                        JSONArray arr = new JSONObject(body).optJSONArray("scripts");
+                        for (int i = 0; arr != null && i < arr.length(); i++) {
+                            String n = arr.getJSONObject(i).optString("name", "");
+                            if (!n.isEmpty()) out.add(n);
+                        }
+                    } catch (Throwable ignored) {}
+                }
+                cb.done(out);
+            }
+        });
+    }
+
     private static void writeOne(final Activity act, final Board board,
                                  final java.util.List<String[]> list, final int i,
                                  final int okN, final int failN, final long ver,
-                                 final long since, final Cb cb) {
+                                 final long since,
+                                 final java.util.List<String> onBoard,
+                                 final java.util.List<String> serverNames,
+                                 final Cb cb) {
         if (board == null || i >= list.size()) {
             setLastVer(act, ver);
             end();
+            // ⚠️ 算"板子上有、服务器没有"的那些 —— 由**调用方弹窗确认后**再删
+            final java.util.List<String> extra = new java.util.ArrayList<>();
+            for (String n : onBoard) if (!serverNames.contains(n)) extra.add(n);
             String info = (since == 0 ? "全量" : "增量") + " " + list.size() + " 条"
-                    + "(写入板子 " + okN + (failN > 0 ? ",失败 " + failN : "") + ")";
+                    + "(写入板子 " + okN + (failN > 0 ? ",失败 " + failN : "") + ")"
+                    + (extra.isEmpty() ? "" : ",服务器上没有的 " + extra.size() + " 条");
             if (cb != null) cb.done(true, info);
+            pendingExtra = extra;          // 给 UI 用
             return;
         }
         final String[] kv = list.get(i);
@@ -130,7 +176,7 @@ public class FlowSync {
                     @Override public void run() {
                         writeOne(act, board, list, i + 1,
                                 okN + (ok ? 1 : 0), failN + (ok ? 0 : 1),
-                                ver, since, cb);
+                                ver, since, onBoard, serverNames, cb);
                     }
                 });
             }

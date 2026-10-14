@@ -930,11 +930,11 @@ public class MainActivity extends Activity {
         // ---- 流程列表 ----
         LinearLayout head = card(null);
         head.addView(btnRow(null, new String[][]{
-                {"刷新列表", "reload"}, {"新建流程", "new"}
+                {"☁️ 同步服务器", "reload"}, {"新建流程", "new"}
         }, new View.OnClickListener() {
             @Override public void onClick(View v) {
                 if ("new".equals(v.getTag())) newFlow();
-                else refreshScripts();
+                else syncFromServer();
             }
         }));
         // 和服务器相关的两个操作单独一行(用户要求)
@@ -1049,6 +1049,70 @@ public class MainActivity extends Activity {
      *        服务器(权威) ──拉下来──> App ──写进板子──> 板子(执行)
      *                                     ↘ 同时更新本地状态
      */
+    /**
+     * 「☁️ 同步服务器」—— 把板子同步成服务器的样子:
+     *   ① 服务器启用的 → 写进板子
+     *   ② 板子上有、服务器没有的 → **列出来让用户确认**,确认后删掉
+     *
+     * ⚠️ ② **不自动删** —— 之前"默默按服务器状态删板子"的逻辑两次清空了板子。
+     *    现在把决定权交回给用户 ✅
+     */
+    private void syncFromServer() {
+        toast("正在从服务器同步…");
+        FlowSync.pull(this, board, true, new FlowSync.Cb() {
+            @Override public void done(final boolean ok, final String info) {
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        boardLog("同步服务器 → " + info);
+                        scriptsLoaded = false;
+                        lastScriptsSig = "";
+                        if (tab == TAB_SCRIPTS) fetchScripts();
+                        if (!ok) { toast("❌ " + info); return; }
+                        final java.util.List<String> extra = FlowSync.pendingExtra;
+                        if (extra == null || extra.isEmpty()) {
+                            toast("✅ 已同步(" + info + ")");
+                            return;
+                        }
+                        // 列出多余的,让用户决定删不删
+                        StringBuilder sb = new StringBuilder();
+                        sb.append("服务器上没有这些流程,板子上却还有:\n\n");
+                        for (String n : extra) sb.append("· ").append(n).append("\n");
+                        sb.append("\n要删掉它们吗?(删了就只剩服务器上启用的那些)");
+                        new android.app.AlertDialog.Builder(MainActivity.this)
+                                .setTitle("同步:发现多余的流程")
+                                .setMessage(sb.toString())
+                                .setPositiveButton("删掉这 " + extra.size() + " 条",
+                                        new android.content.DialogInterface.OnClickListener() {
+                                    @Override public void onClick(android.content.DialogInterface d, int w) {
+                                        deleteFlowsSequential(extra, 0, 0);
+                                    }
+                                })
+                                .setNegativeButton("保留", null)
+                                .show();
+                    }
+                });
+            }
+        });
+    }
+
+    /** 串行删掉一批流程 */
+    private void deleteFlowsSequential(final java.util.List<String> names, final int i, final int done) {
+        if (i >= names.size()) {
+            toast("✅ 已删掉 " + done + " 条");
+            FlowStore st = new FlowStore(this);
+            for (String n : names) st.remove(n);
+            scriptsLoaded = false;
+            lastScriptsSig = "";
+            fetchScripts();
+            return;
+        }
+        board.delete(names.get(i), new Board.Cb() {
+            @Override public void done(boolean ok, String body) {
+                deleteFlowsSequential(names, i + 1, done + (ok ? 1 : 0));
+            }
+        });
+    }
+
     /** 「⬆️ 上传流程」—— 把板子上**所有**流程传到服务器(同名覆盖、不同名新建) */
     private void uploadAllFlows() {
         toast("正在上传板子上的流程到服务器…");
