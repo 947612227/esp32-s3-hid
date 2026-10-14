@@ -31,8 +31,24 @@ public class FlowSync {
 
     /** 「刷新」/「上传」正在跑 —— 防抖,避免用户连点导致重入 */
     private static volatile boolean busy = false;
+    private static volatile long busyAt = 0;
+    private static final long BUSY_TIMEOUT_MS = 90_000;
 
-    public static boolean isBusy() { return busy; }
+    /**
+     * ⚠️⚠️ **必须有看门狗** —— 踩过两次同一个坑:
+     *   某个异步步骤(比如 board.scripts() 的回调)因为板子忙**永远不回来**,
+     *   busy 就一直是 true ⇒ 后面所有按钮都提示"正在同步中,请稍候",
+     *   用户以为按钮坏了。(上次是 refreshing 泄漏,这次是 busy —— 同一类错误。)
+     *   所以:超时 90 秒就认定卡死,强制放行。
+     */
+    public static boolean isBusy() {
+        if (busy && System.currentTimeMillis() - busyAt > BUSY_TIMEOUT_MS) {
+            android.util.Log.w("TouchPad", "同步卡死超过 90 秒,强制放行");
+            busy = false;
+        }
+        return busy;
+    }
+    private static void begin() { busy = true; busyAt = System.currentTimeMillis(); }
 
     /**
      * 上次同步发现「板子上有、服务器没有」的流程名。
@@ -65,11 +81,11 @@ public class FlowSync {
      */
     public static void pull(final Activity act, final Board board, final boolean force,
                             final Cb cb) {
-        if (busy) {
+        if (isBusy()) {
             if (cb != null) cb.done(false, "正在同步中,请稍候");
             return;
         }
-        busy = true;
+        begin();
         final long since = force ? 0 : lastVer(act);
 
         Server.fetchFlows(act, since, new Server.Cb() {
@@ -192,9 +208,9 @@ public class FlowSync {
      * (`Server.pushFlow` 传 baseVer=0 = 盲写,一定覆盖成功)
      */
     public static void uploadAll(final Activity act, final Board board, final Cb cb) {
-        if (busy) { if (cb != null) cb.done(false, "正在同步中,请稍候"); return; }
+        if (isBusy()) { if (cb != null) cb.done(false, "正在同步中,请稍候"); return; }
         if (board == null) { if (cb != null) cb.done(false, "板子没连上"); return; }
-        busy = true;
+        begin();
 
         board.scripts(new Board.Cb() {
             @Override public void done(boolean ok, String body) {
@@ -258,9 +274,9 @@ public class FlowSync {
 
     /** 删掉**板子上所有流程**(用户明确点「清空本地流程」才执行) */
     public static void clearBoard(final Activity act, final Board board, final Cb cb) {
-        if (busy) { if (cb != null) cb.done(false, "正在同步中,请稍候"); return; }
+        if (isBusy()) { if (cb != null) cb.done(false, "正在同步中,请稍候"); return; }
         if (board == null) { if (cb != null) cb.done(false, "板子没连上"); return; }
-        busy = true;
+        begin();
 
         board.scripts(new Board.Cb() {
             @Override public void done(boolean ok, String body) {
