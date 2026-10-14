@@ -163,7 +163,82 @@ public class Dialogs {
         // 返回键允许关闭(否则可能卡住);如要禁用改成 false
         dlg.setCancelable(true);
 
-        dlg.show();
+        // ⚠️⚠️ **Activity 已经没了就别弹** ——
+
+
+        //    踩过的崩溃(用户实测:"点了多次刷新列表 app 崩了"):
+
+
+        //      android.view.WindowManager$BadTokenException:
+
+
+        //        Unable to add window -- token ... is not valid;
+
+
+        //        is your activity running?
+
+
+        //        at Dialogs.show(:166)
+
+
+        //        at MainActivity.showFirstSetupGuide(:3408)
+
+
+        //        at MainActivity$74.done(:3107)   ← 异步回调
+
+
+        //        at Board$2.run(Board.java:281)   ← 网络/BLE 线程回来
+
+
+        //
+
+
+        //    根因:请求是异步的,回来时 Activity 可能已经 finish / 被重建。
+
+
+        //    保护加在**这一处**,全 App 的弹窗就都安全了 ✅
+
+
+        if (ctx instanceof android.app.Activity) {
+
+
+            android.app.Activity act = (android.app.Activity) ctx;
+
+
+            if (act.isFinishing()
+
+
+                    || (android.os.Build.VERSION.SDK_INT >= 17 && act.isDestroyed())) {
+
+
+                android.util.Log.w("TouchPad", "Dialogs:Activity 已结束,跳过弹窗:" + title);
+
+
+                return null;
+
+
+            }
+
+
+        }
+
+
+        try {
+
+
+            dlg.show();
+
+
+        } catch (android.view.WindowManager.BadTokenException e) {
+
+
+            android.util.Log.w("TouchPad", "Dialogs:BadToken 已忽略:" + e.getMessage());
+
+
+            return null;
+
+
+        }
         return dlg;
     }
 

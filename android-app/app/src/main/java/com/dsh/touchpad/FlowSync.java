@@ -30,6 +30,18 @@ public class FlowSync {
     private static final String PREF = "flow_sync";
     private static final String KEY_VER = "lastVer";
 
+    /**
+     * 正在刷新中 —— **防抖**。
+     *
+     * ⚠️ 用户实测:"点了多次刷新列表,app 貌似崩溃了"。
+     *    每点一次都会起一次全量同步(要从服务器拉 + 逐条写板子),
+     *    连点会同时跑好几个,既拖垮蓝牙通道,也容易触发各种竞态。
+     *    所以刷新期间直接忽略后续点击。
+     */
+    private static volatile boolean refreshing = false;
+
+    public static boolean isRefreshing() { return refreshing; }
+
     /** 上次同步到的版本号 */
     public static long lastVer(Activity a) {
         return a.getSharedPreferences(PREF, 0).getLong(KEY_VER, 0);
@@ -61,6 +73,13 @@ public class FlowSync {
      */
     public static void pull(final Activity act, final Board board, final boolean force,
                             final Cb cb) {
+        if (force) {
+            if (refreshing) {                      // 防抖:刷新期间忽略重复点击
+                if (cb != null) cb.done(false, "正在刷新中,请稍候");
+                return;
+            }
+            refreshing = true;
+        }
         final long since = force ? 0 : lastVer(act);
         Server.fetchFlows(act, since, new Server.Cb() {
             @Override public void done(final boolean ok, final String body) {
@@ -75,11 +94,14 @@ public class FlowSync {
 
                             // 先处理元数据 + 收集要写板子的
                             final java.util.List<String[]> toWrite = new java.util.ArrayList<>();
+                            // 服务器这次给的全部名字(用来做全量对齐)
+                            final java.util.Set<String> serverNames = new java.util.HashSet<>();
                             int removed = 0;
                             for (int i = 0; arr != null && i < arr.length(); i++) {
                                 JSONObject f = arr.getJSONObject(i);
                                 String name = f.optString("name");
                                 if (name.isEmpty()) continue;
+                                serverNames.add(name);
                                 // ⚠️ **禁用 / 删除的都要从板子上移除** ——
                                 //    服务器用 status 控制"客户端能拉到哪些流程":
                                 //      enabled  → 下发正文,可以执行
@@ -110,7 +132,7 @@ public class FlowSync {
                             //      就写"板子写入 N 条",日志在骗人 ——
                             //      板子上其实一条都没多。
                             writeSequential(act, board, toWrite, 0, 0, 0, ver,
-                                            since, removed, cb);
+                                            since, removed, cb, force, serverNames);
                         } catch (Throwable t) {
                             if (cb != null) cb.done(false, "解析失败:" + t.getMessage());
                         }
@@ -124,9 +146,30 @@ public class FlowSync {
     private static void writeSequential(final Activity act, final Board board,
                                         final java.util.List<String[]> list, final int i,
                                         final int okN, final int failN, final long ver,
-                                        final long since, final int removed, final Cb cb) {
+                                        final long since, final int removed, final Cb cb,
+                                        final boolean forceAlign,
+                                        final java.util.Set<String> serverNames) {
         if (board == null || i >= list.size()) {
             setLastVer(act, ver);
+            if (forceAlign) {
+                // ⚠️⚠️ **全量刷新要对齐服务器**:本地有、服务器没有的,
+                //    一定是服务器上被**禁用/删除**了(或者别人删的).
+                //    用户明确要求:"禁用了流程,客户端刷新要全量加载服务器的数据,
+                //    不保留本地数据"。所以这里把多出来的也一并清掉,
+                //    否则板子上会留着服务器已经不认的流程。
+                try {
+                    java.util.List<String> mine = new FlowStore(act).allNames();
+                    for (String n2 : mine) {
+                        if (!serverNames.contains(n2)) {
+                            new FlowStore(act).remove(n2);
+                            if (board != null) board.delete(n2, null);
+                        }
+                    }
+                } catch (Throwable t) {
+                    android.util.Log.w("TouchPad", "全量对齐失败:" + t.getMessage());
+                }
+            }
+            refreshing = false;
             String info = (since == 0 ? "全量" : "增量") + " " + list.size() + " 条"
                     + "(板子写入成功 " + okN + (failN > 0 ? ",失败 " + failN : "")
                     + ",删除 " + removed + ") → 版本 " + ver;
@@ -141,7 +184,7 @@ public class FlowSync {
                     @Override public void run() {
                         writeSequential(act, board, list, i + 1,
                                 okN + (ok ? 1 : 0), failN + (ok ? 0 : 1),
-                                ver, since, removed, cb);
+                                ver, since, removed, cb, forceAlign, serverNames);
                     }
                 });
             }
