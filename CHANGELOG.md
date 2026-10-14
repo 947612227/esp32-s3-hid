@@ -13,6 +13,16 @@
 - 测试板升到 1.3.0 后首次心跳带全量,正式库里该板 8 条 NULL 留底已补回。
 - `tools/upload-apk.sh`:修"服务器上"版本读不出来(列表接口字段是 `versionCode` 等,脚本按数据库列名读)。
 
+### 服务端:APK / 固件只保留最近 5 个版本
+
+- 新增 `server/src/retention.js`。上传 APK 或固件成功后,以及服务启动时,各清理一次:
+  - APK 按 `versionCode` 计,保留最大的 5 个;同一个 versionCode 传过多次的,只留最新那次。
+  - 固件按渠道(stable / beta)分别计,按上传时间保留最近 5 个版本;被板子策略指定(`policies.target`)的固件不删。
+  - 记录和 `data/apk`、`data/firmware` 下的文件一起删,每删一条写审计 `prune_apk` / `prune_firmware`。
+  - 清理出错只打日志,不影响上传和启动。上传接口的响应多带一个 `pruned` 字段(删掉的 versionCode / 版本号)。
+- 测试 `tests/server/test_version_prune.sh`(临时 MySQL):上传后清理、重复 versionCode、按渠道计、策略指定的固件保留、启动时清理历史数据、文件与记录一一对应、检查更新和下载照常。
+- `tests/server/test_schema_deploy.sh`:正式库已部署过本分支时(已有 `counters`),改为期望迁移"不新增任何表"。
+
 ### 固件
 
 - **BLE 控制通道(优化1)**

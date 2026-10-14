@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const db = require('../db');
 const auth = require('../auth');
+const retention = require('../retention');
 const { decrypt } = require('../crypto');
 const { PUBLIC_DIR, FW_DIR, APK_DIR, BOOT_AT, ONLINE_MS, json, sha256File, clientIp, parseCookies, isOnline, audit, needLogin, needAdminRole, uploadFw, uploadApk } = require('../common');
 
@@ -370,7 +371,8 @@ router.post('/api/admin/firmware', needLogin, needAdminRole, uploadFw.single('fi
     [version, body.channel === 'beta' ? 'beta' : 'stable', name, req.file.size,
      sha256File(path.join(FW_DIR, name)), String(body.notes || ''), req.user.id]);
   await audit(req.user.id, 'upload_firmware', version, `id=${r.insertId}`, clientIp(req));
-  json(res, 200, { ok: true, id: r.insertId });
+  const pruned = await retention.pruneAll(req.user.id, clientIp(req), '上传固件 ' + version);
+  json(res, 200, { ok: true, id: r.insertId, pruned });
 });
 
 router.delete('/api/admin/firmware/:id', needLogin, needAdminRole, async (req, res) => {
@@ -418,7 +420,8 @@ router.post('/api/admin/apk', needLogin, needAdminRole, uploadApk.single('file')
     [code, String(body.versionName || code), name, req.file.size,
      sha256File(path.join(APK_DIR, name)), String(body.notes || ''), req.user.id]);
   await audit(req.user.id, 'upload_apk', String(code), '', clientIp(req));
-  json(res, 200, { ok: true, id: r.insertId });
+  const pruned = await retention.pruneAll(req.user.id, clientIp(req), '上传 APK ' + code);
+  json(res, 200, { ok: true, id: r.insertId, pruned });
 });
 
 router.delete('/api/admin/apk/:id', needLogin, needAdminRole, async (req, res) => {

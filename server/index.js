@@ -69,6 +69,7 @@ async function boot() {
   console.log('初始化数据库…');
   await db.initSchema();
   await require('./src/migrate').migrate();
+  await require('./src/retention').pruneAll(null, '', '启动');
 
   tokens.board = await db.getSetting('boardToken', '');
   tokens.app = await db.getSetting('appToken', '');

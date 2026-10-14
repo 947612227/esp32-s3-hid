@@ -33,6 +33,7 @@ EXPECTED_NEW_TABLES="counters"              # 本分支迁移在正式库上**�
 log()  { echo "[$(date +%H:%M:%S)] $*"; }
 fail() { echo "  ❌ $*"; FAILS=$((FAILS + 1)); }
 pass() { echo "  ✅ $*"; }
+info() { echo "  ·  $*"; }
 
 # 退出时清理:停服务、停临时实例、删临时目录和本测试建的软链接/数据目录
 cleanup() {
@@ -166,7 +167,11 @@ if start_server tp_prodcopy; then
   diff "$TMP/ref.txt" "$TMP/ref_after.txt" > "$TMP/c.diff"
   CHANGED=$(grep -c '^<' "$TMP/c.diff")                                     # 被改/被删的(必须 0)
   NEW_TABLES=$(grep -E '^> (列|索引)' "$TMP/c.diff" | awk '{print $3}' | cut -d. -f1 | sort -u | tr '\n' ' ' | sed 's/ $//')
-  if [ "$CHANGED" -eq 0 ] && [ "$NEW_TABLES" = "$EXPECTED_NEW_TABLES" ]; then
+  # 正式库已经部署过本分支时,这些表早就在了 ⇒ 应当一项都不新增
+  WANT_NEW=$(for t in $EXPECTED_NEW_TABLES; do
+    grep -qE "^列 +$t\." "$TMP/ref.txt" || echo "$t"; done | sort -u | tr '\n' ' ' | sed 's/ $//')
+  [ -z "$WANT_NEW" ] && info "正式库已含「$EXPECTED_NEW_TABLES」(已部署过本分支),迁移应不改任何结构"
+  if [ "$CHANGED" -eq 0 ] && [ "$NEW_TABLES" = "$WANT_NEW" ]; then
     pass "迁移只新增了表「$NEW_TABLES」($(grep -c '^>' "$TMP/c.diff") 项),已有表一项没动"
   else
     fail "迁移对正式库结构的改动不符合预期(改动 $CHANGED 项,新表「$NEW_TABLES」):"; head -20 "$TMP/c.diff"
