@@ -667,8 +667,13 @@ app.get('/api/v1/app/flows', needApp, async (req, res) => {
       ? await db.q(`SELECT ${FIELDS} FROM flows
                     WHERE owner = ? AND ver > ? ORDER BY ver`, [owner, since])
       : await db.q(`SELECT ${FIELDS} FROM flows
-                    WHERE owner = ? AND deleted = 0 AND status = 'enabled'
-                    ORDER BY name`, [owner]);
+                    WHERE owner = ? ORDER BY name`, [owner]);
+    // ⚠️⚠️ 全量**不再过滤 status** ——
+    //   原来只给 enabled,结果客户端"全量对齐"时发现自己列表里
+    //   服务器没给的流程(其实是别的来源的)就**全删了**,
+    //   实测把板子上 6 条 legacy 流程一起清掉了。
+    //   现在:disabled/deleted 也返回,**但 text=null**(见上面 map),
+    //   客户端据此只删"被明确标记的"那几条,其余不动。
 
     json(res, 200, {
       ok: true, ver, full: since === 0,

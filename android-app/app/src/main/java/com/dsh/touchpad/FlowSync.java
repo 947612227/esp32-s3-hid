@@ -95,13 +95,14 @@ public class FlowSync {
                             // 先处理元数据 + 收集要写板子的
                             final java.util.List<String[]> toWrite = new java.util.ArrayList<>();
                             // 服务器这次给的全部名字(用来做全量对齐)
-                            final java.util.Set<String> serverNames = new java.util.HashSet<>();
+                            // 服务器**明确标了** disabled/deleted 的名字(用来对齐清理)
+                            final java.util.List<String> serverDisabled = new java.util.ArrayList<>();
                             int removed = 0;
                             for (int i = 0; arr != null && i < arr.length(); i++) {
                                 JSONObject f = arr.getJSONObject(i);
                                 String name = f.optString("name");
                                 if (name.isEmpty()) continue;
-                                serverNames.add(name);
+
                                 // ⚠️ **禁用 / 删除的都要从板子上移除** ——
                                 //    服务器用 status 控制"客户端能拉到哪些流程":
                                 //      enabled  → 下发正文,可以执行
@@ -109,6 +110,9 @@ public class FlowSync {
                                 //      deleted  → 连记录都删掉
                                 //    后两种在板子上都不该留着,否则会继续被执行。
                                 String status = f.optString("status", "enabled");
+                                if (!"enabled".equals(status) || f.optBoolean("deleted", false)) {
+                                    serverDisabled.add(name);
+                                }
                                 if (f.optBoolean("deleted", false)
                                         || "deleted".equals(status)
                                         || "disabled".equals(status)) {
@@ -132,7 +136,7 @@ public class FlowSync {
                             //      就写"板子写入 N 条",日志在骗人 ——
                             //      板子上其实一条都没多。
                             writeSequential(act, board, toWrite, 0, 0, 0, ver,
-                                            since, removed, cb, force, serverNames);
+                                            since, removed, cb, force, serverDisabled);
                         } catch (Throwable t) {
                             if (cb != null) cb.done(false, "解析失败:" + t.getMessage());
                         }
@@ -148,22 +152,33 @@ public class FlowSync {
                                         final int okN, final int failN, final long ver,
                                         final long since, final int removed, final Cb cb,
                                         final boolean forceAlign,
-                                        final java.util.Set<String> serverNames) {
+                                        final java.util.List<String> serverDisabled) {
         if (board == null || i >= list.size()) {
             setLastVer(act, ver);
-            if (forceAlign) {
+            // ⚠️⚠️⚠️ **保险:服务器返回空列表时绝不做对齐清理!**
+            //
+            //   血的教训(我自己刚踩的):加了对齐之后,有一次服务器返回 0 条
+            //   (deviceId 不匹配 / 接口异常 / 刚清过数据),
+            //   对齐逻辑就把**本地和板子上所有流程全删了** ——
+            //   6 个流程瞬间消失,而且板子上也没了。
+            //
+            //   "服务器没有" 有两种可能:
+            //     ① 真的被禁用/删除了 ⇒ 该清
+            //     ② 服务器这次没给数据(异常/空库/换设备)⇒ **绝对不能清**
+            //   分不清的时候,**宁可留着**。所以加这道闸:
+            //   只有服务器**明确给了非空清单**才允许做对齐清理。
+            // ⚠️ 只删**服务器明确标了 disabled/deleted** 的那些 ✅
+            //    (serverDisabled 在解析时就收集好了)
+            if (forceAlign && !serverDisabled.isEmpty()) {
                 // ⚠️⚠️ **全量刷新要对齐服务器**:本地有、服务器没有的,
                 //    一定是服务器上被**禁用/删除**了(或者别人删的).
                 //    用户明确要求:"禁用了流程,客户端刷新要全量加载服务器的数据,
                 //    不保留本地数据"。所以这里把多出来的也一并清掉,
                 //    否则板子上会留着服务器已经不认的流程。
                 try {
-                    java.util.List<String> mine = new FlowStore(act).allNames();
-                    for (String n2 : mine) {
-                        if (!serverNames.contains(n2)) {
-                            new FlowStore(act).remove(n2);
-                            if (board != null) board.delete(n2, null);
-                        }
+                    for (String n2 : new java.util.ArrayList<String>(serverDisabled)) {
+                        new FlowStore(act).remove(n2);
+                        if (board != null) board.delete(n2, null);
                     }
                 } catch (Throwable t) {
                     android.util.Log.w("TouchPad", "全量对齐失败:" + t.getMessage());
@@ -184,7 +199,7 @@ public class FlowSync {
                     @Override public void run() {
                         writeSequential(act, board, list, i + 1,
                                 okN + (ok ? 1 : 0), failN + (ok ? 0 : 1),
-                                ver, since, removed, cb, forceAlign, serverNames);
+                                ver, since, removed, cb, forceAlign, serverDisabled);
                     }
                 });
             }
