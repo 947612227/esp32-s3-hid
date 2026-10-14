@@ -139,7 +139,7 @@ struct ScriptStep {
   uint8_t e = 0, f = 0;                 // 扩展坐标(8 位精度)/ usage
   uint32_t ms = 0;                      // 时长(毫秒)
   uint16_t next = 0;                    // Goto: 目标步骤下标
-  uint8_t  repeat = 0;                  // Repeat: 剩余次数
+  uint16_t repeat = 0;                  // Repeat: 次数(1~65535;以前 uint8_t,repeat 300 会被截成 44)
   // 备注(可选):写在参数后面的自由文本,例如 "T 0.5 0.5 60 点我的"
   // 用途:日志里用人类语言说明这一步在干什么,而不是一串坐标
   char     note[STEP_NOTE_LEN] = {0};
@@ -160,7 +160,7 @@ struct Script {
 // ---------------------------------------------------------------------------
 struct ScriptResult {
   bool     ok = false;
-  uint16_t executed = 0;
+  uint32_t executed = 0;                // 实际执行的步数(含循环展开,长循环会超过 65535)
   char     error[64] = {0};
 };
 

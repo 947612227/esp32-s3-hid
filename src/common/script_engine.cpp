@@ -455,7 +455,9 @@ bool ScriptEngine::parse(const char *text, Script &out, char *errBuf,
     } else if (!strcasecmp(cmd, "repeat") || !strcasecmp(cmd, "loop")) {
       if (n < 2) { fail("参数不足", "repeat n"); break; }
       st.op = StepOp::Repeat;
-      st.repeat = (uint8_t)atol(tok[1]);
+      long times = atol(tok[1]);
+      if (times < 0 || times > 65535) { fail("重复次数要在 1~65535 之间", "repeat n"); break; }
+      st.repeat = (uint16_t)times;
       st.next = out.stepCount;   // 回填:重复时跳回自身
 
     } else if (!strcasecmp(cmd, "waitfor") || !strcasecmp(cmd, "wf")) {
@@ -701,6 +703,25 @@ bool ScriptEngine::parse(const char *text, Script &out, char *errBuf,
 // ---------------------------------------------------------------------------
 //  文件系统
 // ---------------------------------------------------------------------------
+static void repairOldExamples();   // 定义在示例脚本文本之后
+
+// 只做跳转/判断、不产生任何实际动作的步骤(死循环检测用)
+static bool isControlOnly(StepOp op) {
+  switch (op) {
+    case StepOp::Goto:
+    case StepOp::Repeat:
+    case StepOp::IfPage:
+    case StepOp::Else:
+    case StepOp::EndIf:
+    case StepOp::EndLoop:
+    case StepOp::Break:
+    case StepOp::None:
+      return true;
+    default:
+      return false;
+  }
+}
+
 bool ScriptEngine::begin() {
   // 先尝试挂载(不自动格式化)。空白分区首次挂载会失败,这时显式格式化再挂载。
   // 之前用 begin(true) 会在空白分区上"看似成功但容量为 0",所以改成显式流程。
@@ -742,6 +763,7 @@ bool ScriptEngine::begin() {
   if (!LittleFS.exists(SCRIPT_DIR)) {
     LittleFS.mkdir(SCRIPT_DIR);
   }
+  repairOldExamples();
   reload();
   return true;
 }
@@ -913,6 +935,23 @@ static const char *EX_SCROLL_DOWN =
 
 static const char *EX_REPEAT =
     "# 演示 repeat 的用法\n"
+    "# repeat n ... endloop:把中间的步骤整体重复 n 次(1~65535)。\n"
+    "T 0.30 0.50 60\n"
+    "wait 200\n"
+    "T 0.50 0.50 60\n"
+    "wait 200\n"
+    "T 0.70 0.50 60\n"
+    "wait 300\n"
+    "repeat 3\n"
+    "T 0.50 0.30 60\n"
+    "wait 150\n"
+    "T 0.50 0.70 60\n"
+    "wait 150\n"
+    "endloop\n";
+
+// 旧版固件写进板子的"重复演示"(缺 endloop,解析器会拒绝 ⇒ 每次开机都被跳过)
+static const char *EX_REPEAT_OLD =
+    "# 演示 repeat 的用法\n"
     "# repeat n 表示:把它后面的所有步骤整体重复 n 次。\n"
     "T 0.30 0.50 60\n"
     "wait 200\n"
@@ -925,6 +964,25 @@ static const char *EX_REPEAT =
     "wait 150\n"
     "T 0.50 0.70 60\n"
     "wait 150\n";
+
+/**
+ * 修复旧固件写坏的示例。
+ * 只在文件内容和旧示例**一字不差**时才覆盖 —— 用户改过的不动。
+ */
+static void repairOldExamples() {
+  String path = String(SCRIPT_DIR) + "/重复演示.txt";
+  if (!LittleFS.exists(path)) return;
+  File f = LittleFS.open(path, "r");
+  if (!f) return;
+  String cur = f.readString();
+  f.close();
+  if (cur != EX_REPEAT_OLD) return;
+  File w = LittleFS.open(path, "w");
+  if (!w) return;
+  w.print(EX_REPEAT);
+  w.close();
+  LOGF("%s 已修复旧示例「重复演示」(补上 endloop)", TAG);
+}
 
 static const char *EX_CURVE =
     "# 曲线滑动 + 双指捏合\n"
@@ -1075,17 +1133,29 @@ ScriptResult ScriptEngine::run(uint8_t index, StepHook hook,
   // Repeat 步骤需要在执行期保存剩余次数,所以复制一份步骤到栈上/局部
   ScriptStep steps[SCRIPT_MAX_STEPS];
   memcpy(steps, sc->steps, sizeof(ScriptStep) * sc->stepCount);
-  uint8_t repeatLeft[SCRIPT_MAX_STEPS] = {0};
+  uint16_t repeatLeft[SCRIPT_MAX_STEPS] = {0};
 
   uint32_t beginMs = millis();
   uint8_t  pc = 0;
-  uint16_t guard = 0;
+  // 死循环检测:连续多少步都只是跳转/判断(没有点击、等待、通知)。
+  // ⚠️ 以前是"总步数 > 1024 就报错" —— repeat 200 × 10 步的正常长循环也会被误杀。
+  //    真正要防的是"什么都不干的空转"。
+  uint32_t idleSteps = 0;
+  static const uint32_t IDLE_STEPS_MAX = 2000;    // 正常流程连续纯跳转不会超过几十步;旧版是总步数 1024 封顶
+  uint32_t lastServiceMs = millis();    // 上次让出给网络/蓝牙的时刻
   _stopRequested = false;
 
   while (pc < sc->stepCount) {
-    if (++guard > 1024) {
-      setErr(res.error, sizeof(res.error), "步骤执行次数过多,疑似死循环");
+    if (idleSteps > IDLE_STEPS_MAX) {
+      setErr(res.error, sizeof(res.error), "连续 %lu 步没有点击/等待,疑似死循环",
+             (unsigned long)IDLE_STEPS_MAX);
+      LOGF("%s %s", TAG, res.error);
       return res;
+    }
+    // 至少每 20ms 让一次网络/蓝牙:只有点击、没有 wait 的循环也能收到「停止」
+    if (s_idleHook && millis() - lastServiceMs >= 20) {
+      s_idleHook();
+      lastServiceMs = millis();
     }
     // 每步前询问外部(Web 的"停止"按钮)
     if (hook != nullptr && !hook((uint16_t)pc, sc->stepCount, hookCtx)) {
@@ -1258,6 +1328,8 @@ ScriptResult ScriptEngine::run(uint8_t index, StepHook hook,
 
     if (advance) pc++;
     res.executed++;
+    // 按步骤类型判断(不能按耗时:每步都打串口日志,纯跳转也要 ~3ms)
+    if (isControlOnly(st.op)) idleSteps++; else idleSteps = 0;
   }
 
   LOGF("%s 完成:%u 步,耗时 %lu ms", TAG, (unsigned)res.executed,

@@ -186,7 +186,7 @@ static void printScriptList(uint8_t index, bool showSteps) {
         Serial.printf("-> 第 %u 步", (unsigned)st.next);
         break;
       case StepOp::Repeat:
-        Serial.printf("x%u(其后全部步骤)", (unsigned)st.repeat);
+        Serial.printf("x%u(到 endloop 为止)", (unsigned)st.repeat);
         break;
       default:
         break;
@@ -554,10 +554,11 @@ static void pollControl() {
 //  setup / loop
 // ---------------------------------------------------------------------------
 void setup() {
-  Serial.begin(115200);
   // UART0 发送缓冲调大:BLE 初始化会占用时间,期间日志容易丢
+  // ⚠️ 必须在 begin() **之前**设:之后再设,框架只打一行 log_e 然后返回 0(等于没设)
   Serial.setTxBufferSize(4096);
   Serial.setRxBufferSize(2048);
+  Serial.begin(115200);
   delay(300);
 
 #ifdef CONTROL_ON_UART1
