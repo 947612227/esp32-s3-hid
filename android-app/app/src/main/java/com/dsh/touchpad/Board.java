@@ -30,12 +30,51 @@ public class Board {
     private final ExecutorService pool = Executors.newFixedThreadPool(3);
     private final Handler ui = new Handler(Looper.getMainLooper());
 
+    // ================================================================ 全 App 唯一实例
+    //
+    //  ⚠️ 以前 MainActivity / FlowEditActivity / DebugReceiver 各 new 一个:
+    //     · 传输方式只有 MainActivity 设了 —— 选了「只用 WiFi」,编辑页照样走蓝牙
+    //     · 编辑页自己 setTimeout(12000),各实例的合并/缓存互不相通
+    //  现在全部用 Board.get(ctx),设置一处改、处处生效。
+    private static Board sInstance;
+
+    /** 取全 App 共用的实例(第一次调用时从设置里读地址和传输方式) */
+    public static synchronized Board get(Context c) {
+        if (sInstance == null) {
+            Board b = new Board();
+            if (c != null) {
+                b.attach(c);
+                android.content.SharedPreferences sp =
+                        c.getSharedPreferences("board", Context.MODE_PRIVATE);
+                b.setHost(sp.getString("host", ""));
+                b.setTransport(sp.getInt("transport", T_AUTO));
+            }
+            sInstance = b;
+        }
+        return sInstance;
+    }
+
+    /**
+     * 调试用:临时指定一个地址的独立实例(adb 广播带 host 参数时),
+     * 不能动共用实例的地址。传输方式跟共用实例一致。
+     */
+    public static Board forHost(Context c, String host) {
+        Board b = new Board();
+        b.attach(c);
+        b.setHost(host);
+        b.setTransport(get(c).getTransport());
+        return b;
+    }
+
+    private Board() { }
+
     // 默认**留空**:不写死任何 IP。
     // 首次使用由「自动发现」(UDP 广播)找到板子后写入;
     // 换网络后旧地址失效,同样靠自动发现找回。
-    private String host = "";
-    private int port = 80;
-    private int timeoutMs = 6000;
+    // ⚠️ volatile:界面线程改,后台线程池读
+    private volatile String host = "";
+    private volatile int port = 80;
+    private volatile int timeoutMs = 6000;
 
     public void setHost(String h) {
         if (h == null) return;
@@ -107,7 +146,7 @@ public class Board {
     public static final int T_BLE  = 1;   // 强制蓝牙
     public static final int T_WIFI = 2;   // 强制 WiFi
 
-    private int transport = T_AUTO;
+    private volatile int transport = T_AUTO;
 
     public void setTransport(int t) { transport = t; }
     public int  getTransport()      { return transport; }
@@ -127,7 +166,7 @@ public class Board {
         return true;
     }
 
-    private Context ctx;
+    private volatile Context ctx;
     /** 由 Activity 调一次,给蓝牙连接用 */
     public void attach(Context c) { ctx = c.getApplicationContext(); }
 
@@ -222,70 +261,113 @@ public class Board {
             || path.startsWith("/api/logs")   || path.startsWith("/api/script?");
     }
 
+    // ⚠️ 上面三张表在界面线程(request)和后台线程/蓝牙回调(finish)里都会改,
+    //    HashMap 不是线程安全的 ⇒ 统一用这把锁
+    private final Object tableLock = new Object();
+
+    /**
+     * 会改变板子流程/运行状态的写操作:发出去之前和完成之后都要作废读缓存,
+     * 否则刚保存/删除完立刻读列表,1.5 秒内拿到的还是旧的。
+     * (推页面 /api/page 每 700ms 一次,不在此列 —— 不然缓存形同虚设)
+     */
+    private static boolean changesState(String path) {
+        if (path == null) return false;
+        return path.startsWith("/api/save") || path.startsWith("/api/delete")
+            || path.startsWith("/api/run") || path.startsWith("/api/stop")
+            || path.startsWith("/api/schedule") || path.startsWith("/api/system")
+            || path.startsWith("/api/logs/clear") || path.startsWith("/api/log");
+    }
+
+    private void dropCache() {
+        synchronized (tableLock) {
+            cacheBody.clear();
+            cacheAt.clear();
+        }
+    }
+
     private void request(final String method, final String path, final String body,
-                         final Cb cb) {
-        // ---- ① 短缓存 ----
-        if (mergeable(method, path)) {
+                         Cb cb) {
+        // ⚠️ 回调传 null 表示"不关心结果",请求**照样要发**。
+        //    以前写的是 `if (cb != null) dispatch(...)` —— null 回调的请求根本没发出去:
+        //    编辑页改名后删旧名 board.delete(旧名, null) 从来没生效,板子上留下幽灵流程(实测)。
+        final Cb own = cb != null ? cb : NOOP;
+
+        if (!mergeable(method, path)) {
+            // ---- 写操作:不合并、不缓存,结果只回给自己 ----
+            // ⚠️ 以前写操作也按路径放进 inflight 表:同一路径同时两个请求(连点两次「停止」),
+            //    后一个把前一个的回调覆盖掉,前一个永远收不到结果。
+            if (changesState(path)) dropCache();
+            dispatch(method, path, body, false, own);
+            return;
+        }
+
+        String hit = null;
+        synchronized (tableLock) {
+            // ---- ① 短缓存 ----
             Long at = cacheAt.get(path);
             String c = cacheBody.get(path);
             if (at != null && c != null && System.currentTimeMillis() - at < CACHE_MS) {
-                if (cb != null) {
-                    final boolean ok = true;
-                    final String out = c;
-                    ui.post(new Runnable() {
-                        @Override public void run() { cb.done(ok, out); }
-                    });
+                hit = c;
+            } else {
+                // ---- ② 在途合并 ----
+                java.util.ArrayList<Cb> wait = inflight.get(path);
+                if (wait != null) {
+                    wait.add(own);                  // 只挂回调,不再发请求
+                    return;
                 }
-                return;
+                wait = new java.util.ArrayList<Cb>();
+                wait.add(own);
+                inflight.put(path, wait);
             }
         }
-
-        // ---- ② 在途合并 ----
-        if (mergeable(method, path)) {
-            java.util.ArrayList<Cb> wait = inflight.get(path);
-            if (wait != null) {
-                if (cb != null) wait.add(cb);       // 只挂回调,不再发请求
-                return;
-            }
-            wait = new java.util.ArrayList<Cb>();
-            if (cb != null) wait.add(cb);
-            inflight.put(path, wait);
+        if (hit != null) {
+            final String out = hit;
+            ui.post(new Runnable() {
+                @Override public void run() { own.done(true, out); }
+            });
+            return;
         }
-        // 不可合并的接口(写操作等)不进上面的表,但 finish() 要能通知它
-        if (!mergeable(method, path) && cb != null) {
-            java.util.ArrayList<Cb> one = new java.util.ArrayList<Cb>();
-            one.add(cb);
-            inflight.put(path, one);
-        }
-        if (cb != null) dispatch(method, path, body, cb, true);
+        dispatch(method, path, body, true, null);
     }
 
     /**
-     * 一次请求结束:写缓存 + 通知**所有**等待者(包括合并进来的)。
-     *
-     * ⚠️ leader 的 cb 也在等待者列表里,所以这里统一通知;
-     *    原来那两处 `cb.done(...)` 必须删掉,否则会通知两次。
+     * 一次请求结束。
+     *   可合并的读:写缓存 + 通知**所有**等待者(包括合并进来的)
+     *   写操作:只通知它自己;改状态的写完成后再作废一次缓存
+     *          (写的过程中可能有读请求把旧结果放进了缓存)
      */
-    private void finish(String path, boolean ok, String body) {
-        if (ok && path != null) {
-            cacheBody.put(path, body);
-            cacheAt.put(path, System.currentTimeMillis());
+    private void finish(String path, boolean merged, final Cb own, boolean ok, String body) {
+        final boolean fok = ok;
+        final String fbody = body;
+        if (!merged) {
+            if (changesState(path)) dropCache();
+            ui.post(new Runnable() {
+                @Override public void run() { own.done(fok, fbody); }
+            });
+            return;
         }
-        java.util.ArrayList<Cb> wait = inflight.remove(path);
+        java.util.ArrayList<Cb> wait;
+        synchronized (tableLock) {
+            if (ok && path != null) {
+                cacheBody.put(path, body);
+                cacheAt.put(path, System.currentTimeMillis());
+            }
+            wait = inflight.remove(path);
+        }
         if (wait == null) return;
         for (final Cb w : wait) {
-            if (w == null) continue;
-            final boolean fok = ok;
-            final String fbody = body;
             ui.post(new Runnable() {
                 @Override public void run() { w.done(fok, fbody); }
             });
         }
     }
 
-    /** 真正发出去;把结果同时通知"合并进来的"那些回调 */
+    /**
+     * 真正发出去。
+     * @param merged true = 可合并的读(结果发给 inflight 里所有等待者);false = 写操作(只回 own)
+     */
     private void dispatch(final String method, final String path, final String body,
-                          final Cb cb, final boolean isLead) {
+                          final boolean merged, final Cb own) {
         // ---- 走蓝牙?----
         final String bleCmd = bleUsable() ? toBleCmd(method, path, body) : null;
         if (bleCmd != null) {
@@ -297,7 +379,7 @@ public class Board {
                     android.util.Log.i("TouchLink", "← BLE  " + path + "  "
                             + (ok ? "OK " + resp.length() + "B" : "失败/超时"));
                     final String out = ok ? resp : "蓝牙请求失败/超时";
-                    finish(path, ok, out);
+                    finish(path, merged, own, ok, out);
                 }
             });
             return;
@@ -319,8 +401,9 @@ public class Board {
                             URL u = new URL(baseUrl() + path);
                             c = (HttpURLConnection) u.openConnection();
                             c.setRequestMethod(method);
-                            c.setConnectTimeout(timeoutMs);
-                            c.setReadTimeout(timeoutMs);
+                            final int to = httpTimeout(path);
+                            c.setConnectTimeout(to);
+                            c.setReadTimeout(to);
                             c.setRequestProperty("Accept", "application/json");
                             c.setRequestProperty("Connection", "close");
                             if (body != null) {
@@ -359,9 +442,22 @@ public class Board {
                 //    以前这里直接 cb.done(...) → **每 700ms 崩一次**,
                 //    表现是"App 自己消失 + 无障碍绑定卡死 + waitfor 永远超时"。
                 //    排查了很久才在 logcat 的 crash buffer 里看到。
-                finish(path, fok, fres);
+                finish(path, merged, own, fok, fres);
             }
         });
+    }
+
+    /**
+     * WiFi 请求的超时。读写流程正文放宽到 12 秒 —— 板子可能在跑流程/正忙
+     * (单线程 WebServer),6 秒偶尔不够。
+     * ⚠️ 以前是编辑页自己 setTimeout(12000);共用实例后那样会把状态轮询也拖成 12 秒,
+     *    所以改成按接口区分。
+     */
+    private int httpTimeout(String path) {
+        if (path != null && (path.startsWith("/api/save") || path.startsWith("/api/script?"))) {
+            return Math.max(timeoutMs, 12000);
+        }
+        return timeoutMs;
     }
 
     /** 蓝牙请求的超时:写流程比读状态慢得多 */

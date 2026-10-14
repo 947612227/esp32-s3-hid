@@ -10,7 +10,6 @@ import android.os.Looper;
 import android.text.InputType;
 import android.util.TypedValue;
 import android.view.Gravity;
-import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
@@ -49,11 +48,11 @@ public class MainActivity extends Activity {
     /** 调试用:当前实例(仅给 DebugReceiver 切页签用) */
     static MainActivity CURRENT;
 
-    private final Board board = new Board();
+    Board board;            // 全 App 共用(onCreate 第一件事取),见 Board.get
 
     /** 「控制走哪条路」的设置键 */
     private static final String PREF_TRANSPORT = "transport";
-    private final Handler ui = new Handler(Looper.getMainLooper());
+    final Handler ui = new Handler(Looper.getMainLooper());
     private TimeKeeper time;                 // 网络时间(顶栏显示 + 定时用)
     private TextView clockView;
     private FlowStore flows;                 // 流程附加信息(开启/定时/目标App)
@@ -70,7 +69,7 @@ public class MainActivity extends Activity {
     private String selectedAppPkg = "";
     private android.graphics.drawable.Drawable selectedAppIcon;
 
-    private LinearLayout content;
+    LinearLayout content;
     private LinearLayout tabBar;
     private TextView pillNet, pillHid, pillRun;
 
@@ -119,17 +118,18 @@ public class MainActivity extends Activity {
     private View busyMask;                   // 执行中的遮罩
 
     // 手势页的滑块参数
-    private int swipeMs = 300;
+    int swipeMs = 300;
     private int holdMs = 900;
     private int tapMs = 60;
-    private int repeatTimes = 1;
+    int repeatTimes = 1;
 
     @Override
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
 
         SharedPreferences sp = getSharedPreferences("board", MODE_PRIVATE);
-        board.setHost(sp.getString("host", ""));
+        // 地址和传输方式由 Board.get 第一次创建时从设置里读
+        board = Board.get(this);
 
         time = new TimeKeeper(this);
         flows = new FlowStore(this);
@@ -183,10 +183,6 @@ public class MainActivity extends Activity {
 
         setContentView(shell);
 
-        // 给 Board 一个 Context(蓝牙连接要用),并按设置选传输方式
-        board.attach(this);
-        board.setTransport(getSharedPreferences("board", MODE_PRIVATE)
-                .getInt(PREF_TRANSPORT, Board.T_AUTO));
         showTab(TAB_STATUS);
         sAppCtx = getApplicationContext();
         // 兜底:上次执行中被杀,息屏时间可能卡在"永不",恢复到用户原来的值
@@ -451,13 +447,13 @@ public class MainActivity extends Activity {
             case TAB_STATUS:   buildStatusTab();   break;
             case TAB_SCRIPTS:  buildScriptsTab();  break;
             case TAB_CONTROL:  buildControlTab();  break;
-            case TAB_GESTURE:  buildGestureTab();  break;
-            case TAB_LOGS:     buildLogsTab();     break;
+            case TAB_GESTURE:  gestureTab.build(content);  break;
+            case TAB_LOGS:     logsTab.build(content);     break;
         }
     }
 
     // ================================================================ 通用控件
-    private LinearLayout card(String title) {
+    LinearLayout card(String title) {
         LinearLayout c = new LinearLayout(this);
         c.setOrientation(LinearLayout.VERTICAL);
         c.setBackgroundColor(C_CARD);
@@ -497,7 +493,7 @@ public class MainActivity extends Activity {
         return r;
     }
 
-    private TextView hint(String s) {
+    TextView hint(String s) {
         TextView t = new TextView(this);
         t.setText(s);
         t.setTextColor(C_DIM);
@@ -506,8 +502,8 @@ public class MainActivity extends Activity {
     }
 
     /** 一行按钮(自动均分宽度,不会跑到屏幕外) */
-    private LinearLayout btnRow(String label, String[][] items,
-                                View.OnClickListener h) {
+    LinearLayout btnRow(String label, String[][] items,
+                        View.OnClickListener h) {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         if (label != null) {
@@ -2001,7 +1997,7 @@ public class MainActivity extends Activity {
     };
 
     /** 参数加减控件 */
-    private View stepper(String label, String[] key, final int which) {
+    View stepper(String label, String[] key, final int which) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -2123,209 +2119,9 @@ public class MainActivity extends Activity {
         }, "取消");
     }
 
-    // ================================================================ 手势(坐标板)
-    private TextView padInfo;
-
-    private void buildGestureTab() {
-        LinearLayout c = card("坐标板:在这里操作 = 在手机屏幕对应位置操作");
-        c.addView(hint("按下=点击 · 长按=长按 · 拖动=滑动"));
-
-        final View pad = new View(this);
-        pad.setBackgroundColor(0xff010409);
-        c.addView(pad, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(220)));
-
-        padInfo = hint("等待操作…");
-        c.addView(padInfo);
-
-        pad.setOnTouchListener(makePadListener(pad));
-        content.addView(c);
-
-        LinearLayout manual = card("手动坐标");
-        final EditText ex = new EditText(this);
-        ex.setHint("x,如 0.5 或 50%");
-        ex.setTextSize(13);
-        final EditText ey = new EditText(this);
-        ey.setHint("y,如 0.5 或 50%");
-        ey.setTextSize(13);
-        manual.addView(ex);
-        manual.addView(ey);
-        manual.addView(btnRow(null, new String[][]{
-                {"点击", "tap"}, {"长按", "long"}, {"双击", "double"}
-        }, new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                float x = parseCoord(ex.getText().toString(), 0.5f);
-                float y = parseCoord(ey.getText().toString(), 0.5f);
-                String a = String.valueOf(v.getTag());
-                if ("long".equals(a)) board.longPress(x, y, cb);
-                else if ("double".equals(a)) board.gesture("double", "a=" + x + "&b=" + y, cb);
-                else board.tap(x, y, cb);
-                padInfo.setText(String.format("%s %.3f,%.3f", a, x, y));
-            }
-        }));
-        content.addView(manual);
-
-        LinearLayout two = card("两点滑动(填起点终点)");
-        final EditText[] f = new EditText[4];
-        String[] ph = {"起点 x", "起点 y", "终点 x", "终点 y"};
-        for (int i = 0; i < 4; i++) {
-            f[i] = new EditText(this);
-            f[i].setHint(ph[i]);
-            f[i].setTextSize(13);
-            two.addView(f[i]);
-        }
-        two.addView(btnRow(null, new String[][]{{"滑动", "go"}},
-                new View.OnClickListener() {
-                    @Override public void onClick(View v) {
-                        float[] v4 = new float[4];
-                        for (int i = 0; i < 4; i++) {
-                            v4[i] = parseCoord(f[i].getText().toString(), i % 2 == 0 ? 0.5f : 0.5f);
-                        }
-                        board.swipe(v4[0], v4[1], v4[2], v4[3], swipeMs, cb);
-                        padInfo.setText(String.format("滑动 %.2f,%.2f → %.2f,%.2f",
-                                v4[0], v4[1], v4[2], v4[3]));
-                    }
-                }));
-        content.addView(two);
-
-        LinearLayout rep = card("连续执行(连点/连滑)");
-        rep.addView(stepper("次数", new String[]{"repeat"}, 3));
-        rep.addView(hint("配合上面的「点击」使用:先设次数,再连点"));
-        rep.addView(btnRow(null, new String[][]{
-                {"连点 x N", "multi"}
-        }, new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                float x = parseCoord(ex.getText().toString(), 0.5f);
-                float y = parseCoord(ey.getText().toString(), 0.5f);
-                final int n = repeatTimes;
-                padInfo.setText("连点 " + n + " 次…");
-                for (int i = 0; i < n; i++) {
-                    final int k = i;
-                    ui.postDelayed(new Runnable() {
-                        @Override public void run() {
-                            board.tap(x, y, silent);
-                            if (k == n - 1) padInfo.setText("连点完成 " + n + " 次");
-                        }
-                    }, i * 400L);
-                }
-            }
-        }));
-        content.addView(rep);
-    }
-
-    private View.OnTouchListener makePadListener(final View pad) {
-        return new View.OnTouchListener() {
-            private float dX, dY;
-            private long dT;
-            private boolean moved;
-
-            @Override public boolean onTouch(View v, android.view.MotionEvent e) {
-                float w = v.getWidth(), h = v.getHeight();
-                switch (e.getActionMasked()) {
-                    case MotionEvent.ACTION_DOWN:
-                        dX = e.getX() / w;
-                        dY = e.getY() / h;
-                        dT = System.currentTimeMillis();
-                        moved = false;
-                        if (padInfo != null) {
-                            padInfo.setText(String.format("按下 %.3f,%.3f", dX, dY));
-                        }
-                        return true;
-                    case MotionEvent.ACTION_MOVE:
-                        if (Math.abs(e.getX() / w - dX) > 0.02f
-                                || Math.abs(e.getY() / h - dY) > 0.02f) {
-                            moved = true;
-                            if (padInfo != null) {
-                                padInfo.setText(String.format("拖到 %.3f,%.3f",
-                                        e.getX() / w, e.getY() / h));
-                            }
-                        }
-                        return true;
-                    case MotionEvent.ACTION_UP:
-                        float ux = e.getX() / w, uy = e.getY() / h;
-                        long dt = System.currentTimeMillis() - dT;
-                        if (moved) {
-                            board.swipe(dX, dY, ux, uy, (int) Math.min(Math.max(dt, 80), 1500), cb);
-                            if (padInfo != null) {
-                                padInfo.setText(String.format("滑动 %.2f,%.2f → %.2f,%.2f",
-                                        dX, dY, ux, uy));
-                            }
-                        } else if (dt >= 600) {
-                            board.longPress(ux, uy, cb);
-                            if (padInfo != null) {
-                                padInfo.setText(String.format("长按 %.3f,%.3f", ux, uy));
-                            }
-                        } else {
-                            board.tap(ux, uy, cb);
-                            if (padInfo != null) {
-                                padInfo.setText(String.format("点击 %.3f,%.3f", ux, uy));
-                            }
-                        }
-                        return true;
-                }
-                return false;
-            }
-        };
-    }
-
-    private float parseCoord(String s, float def) {
-        if (s == null) return def;
-        s = s.trim();
-        if (s.isEmpty()) return def;
-        try {
-            if (s.endsWith("%")) return Float.parseFloat(s.substring(0, s.length() - 1)) / 100f;
-            float v = Float.parseFloat(s);
-            if (v > 1f) v /= 32767f;
-            return Math.max(0f, Math.min(1f, v));
-        } catch (Exception e) { return def; }
-    }
-
-    // ================================================================ 日志
-    private TextView logView;
-    private int seenLogs = 0;
-
-    private void buildLogsTab() {
-        LinearLayout c = card("运行日志(板子最近 80 行)");
-        c.addView(btnRow(null, new String[][]{
-                {"刷新", "r"}, {"清空", "c"}
-        }, new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                if ("c".equals(v.getTag())) {
-                    board.clearLogs(new Board.Cb() {
-                        @Override public void done(boolean ok, String body) {
-                            seenLogs = 0;
-                            if (logView != null) logView.setText("(暂无日志)");
-                        }
-                    });
-                } else {
-                    seenLogs = 0;
-                    if (logView != null) logView.setText("");
-                    pullLogs();
-                }
-            }
-        }));
-
-        logView = new TextView(this);
-        logView.setText("(暂无日志)");
-        logView.setTextColor(0xffc9d1d9);      // 提亮一点,11sp 太小太暗看着累
-        logView.setTextSize(12);
-        logView.setTypeface(android.graphics.Typeface.MONOSPACE);
-        logView.setBackgroundColor(0xff010409);
-        logView.setPadding(dp(8), dp(8), dp(8), dp(8));
-        // ⚠️ 高度必须是 WRAP_CONTENT。
-        //    以前写死 dp(480) —— 内容超过就被**裁掉**,
-        //    长一点的流程日志(一次 30+ 行)后面根本看不到。
-        //    改成跟内容走,由外层页面的 ScrollView 负责滚动。
-        logView.setTextIsSelectable(true);      // 能选中复制某几行,方便贴给别人看
-        logView.setLineSpacing(dp(2), 1.0f);
-        c.addView(logView, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT));
-        content.addView(c);
-
-        seenLogs = 0;
-        pullLogs();
-    }
+    // ================================================================ 手势 / 日志(见 GestureTab / LogsTab)
+    private final GestureTab gestureTab = new GestureTab(this);
+    private final LogsTab logsTab = new LogsTab(this);
 
     /**
      * 拉板子日志。
@@ -2338,16 +2134,16 @@ public class MainActivity extends Activity {
      *
      *      现在:悬浮窗和日志页**各自独立**地拿数据,谁在就喂谁。
      */
-    private void pullLogs() {
+    void pullLogs() {
         final boolean needFloat = (floatWin != null && floatWin.isShowing());
         // 两个消费方都不在,就不用发请求了
-        if (logView == null && !needFloat) return;
+        if (!logsTab.isBuilt() && !needFloat) return;
 
         board.logs(new Board.Cb() {
             @Override public void done(boolean ok, String body) {
                 pollBusy = false;
                 if (!ok) {
-                    if (logView != null) logView.setText("读取失败:" + body);
+                    logsTab.showError(body);
                     return;
                 }
                 try {
@@ -2370,29 +2166,20 @@ public class MainActivity extends Activity {
                     }
 
                     // ---- ② 喂日志页签(可能根本没建过)----
-                    if (logView == null) return;
-                    if (lines.length() < seenLogs) { logView.setText(""); seenLogs = 0; }
-                    if (lines.length() == seenLogs) return;
-                    if (seenLogs == 0) logView.setText("");
-                    StringBuilder sb = new StringBuilder();
-                    for (int i = seenLogs; i < lines.length(); i++) {
-                        sb.append(lines.optString(i)).append('\n');
-                    }
-                    logView.append(sb.toString());
-                    seenLogs = lines.length();
+                    logsTab.onLines(lines);
                 } catch (Exception ignored) {}
             }
         });
     }
 
     // ================================================================ 回调 / 刷新
-    private final Board.Cb cb = new Board.Cb() {
+    final Board.Cb cb = new Board.Cb() {
         @Override public void done(boolean ok, String body) {
             toast(Board.messageOf(body));
         }
     };
 
-    private final Board.Cb silent = new Board.Cb() {
+    final Board.Cb silent = new Board.Cb() {
         @Override public void done(boolean ok, String body) { }
     };
 
@@ -4249,7 +4036,7 @@ public class MainActivity extends Activity {
         return dp(28);   // 兜底
     }
 
-    private int dp(int v) {
+    int dp(int v) {
         return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v,
                 getResources().getDisplayMetrics());
     }

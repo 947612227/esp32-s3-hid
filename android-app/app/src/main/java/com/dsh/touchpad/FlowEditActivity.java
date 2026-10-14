@@ -41,7 +41,7 @@ public class FlowEditActivity extends Activity {
     private static final int C_ACC  = 0xff58a6ff;
     private static final int C_WARN = 0xffffd479;
 
-    private final Board board = new Board();
+    private Board board;            // 全 App 共用(onCreate 里取),地址/传输方式和主界面一致
     private FlowStore flows;
     private FlowStore.Meta draft;
     private int index = -1;
@@ -80,7 +80,7 @@ public class FlowEditActivity extends Activity {
         super.onCreate(b);
 
         SharedPreferences sp = getSharedPreferences("board", MODE_PRIVATE);
-        board.setHost(sp.getString("host", ""));
+        board = Board.get(this);
         flows = new FlowStore(this);
 
         Intent it = getIntent();
@@ -418,10 +418,7 @@ public class FlowEditActivity extends Activity {
 
         setContentView(root);
 
-        // 编辑页把超时放宽一点 —— 板子可能在跑流程/正忙,
-        // 6 秒偶尔不够(它是单线程 WebServer)。
-        board.setTimeout(12000);
-
+        // 读写流程正文的超时放宽到 12 秒,见 Board.httpTimeout(按接口区分,不影响状态轮询)
         if (!isNew) loadContent();
     }
 

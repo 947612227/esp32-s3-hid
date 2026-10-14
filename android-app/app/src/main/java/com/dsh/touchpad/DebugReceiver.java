@@ -16,7 +16,7 @@ import org.json.JSONObject;
  *   adb shell am broadcast -a com.dsh.touchpad.DEBUG \
  *       --es op status -n com.dsh.touchpad/.DebugReceiver
  *
- * 支持的 op:status / scripts / logs / control:home / gesture:tap
+ * 支持的 op:status / scripts / logs / logs:clear(读→清→读)/ schedstop:null / control:home / gesture:tap
  */
 public class DebugReceiver extends BroadcastReceiver {
 
@@ -27,11 +27,10 @@ public class DebugReceiver extends BroadcastReceiver {
         String op = it.getStringExtra("op");
         if (op == null) op = "status";
 
-        final Board b = new Board();
+        // 默认用全 App 共用的实例(地址、传输方式和界面一致);
+        // 广播带 host 时临时指定地址,不改共用实例
         String host = it.getStringExtra("host");
-        if (host != null) b.setHost(host);
-        else b.setHost(ctx.getSharedPreferences("board", Context.MODE_PRIVATE)
-                .getString("host", ""));
+        final Board b = host != null ? Board.forHost(ctx, host) : Board.get(ctx);
 
         Log.i(TAG, "=== op=" + op + " host=" + b.baseUrl() + " ===");
 
@@ -59,6 +58,21 @@ public class DebugReceiver extends BroadcastReceiver {
             b.scripts(cb);
         } else if ("logs".equals(op)) {
             b.logs(cb);
+        } else if ("logs:clear".equals(op)) {
+            // 读日志 → 清空 → 立刻再读(整串在 1.5 秒缓存期内):第二次读必须真走网络、读到清空后的内容
+            final Board.Cb last = cb;
+            b.logs(new Board.Cb() {
+                @Override public void done(boolean ok, String body) {
+                    b.clearLogs(new Board.Cb() {
+                        @Override public void done(boolean ok2, String body2) {
+                            b.logs(last);
+                        }
+                    });
+                }
+            });
+        } else if ("schedstop:null".equals(op)) {
+            // 不带回调发请求(界面里"停止脚本"就是这么调的),验证请求照样发出去
+            b.scheduleStop(null);
         } else if ("sysinfo".equals(op)) {
             // 打一份简明的自检信息
             b.status(new Board.Cb() {
