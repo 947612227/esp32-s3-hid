@@ -2,8 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
           xmlns:tools="http://schemas.android.com/tools"
     package="com.dsh.touchpad"
-    android:versionCode="15"
-    android:versionName="3.3">
+    android:versionCode="16"
+    android:versionName="3.4">
 
     <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="35" />
 
