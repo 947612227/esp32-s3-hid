@@ -70,6 +70,7 @@
 - `scripts/check.sh`:一键运行解析器测试、固件 ble/usb 编译、HidDriver 单元测试、App 编译、服务端 JS 语法检查和 shell 语法检查。
 - 新增的真机测试:`tests/ble/*.sh`、`tests/app/test_board_shared.sh`、`tests/adb_only/test_hid_driver_device.sh`。
 - 新增的服务器测试:`tests/server/*.sh`,使用临时 MySQL,不碰线上库。
+- `test_route_split.sh`:拆分之后有意改动的行为登记为"预期差异"(请求、旧响应、新响应、原因);不在表里的差异,以及登记了却没出现的差异,都算失败。
 
 ### 文档(优化17)
 

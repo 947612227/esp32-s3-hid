@@ -7,6 +7,7 @@
 #  1. 导出路由表(方法 + 路径 + 中间件链,按匹配顺序)→ 逐行比对
 #  2. 各用一个全新库启动,跑同一串请求(板子/App/流程/登录/后台/静态/鉴权失败)
 #     → 状态码 + 响应体(去掉时间戳、token 等每次不同的值)逐条比对
+#     拆分之后有意改动的行为登记在 EXPECTED_DIFFS 里,其余任何差异都算失败
 #
 #  用法(仓库根目录): bash tests/server/test_route_split.sh [旧版本 git 引用,默认 63bd4db]
 #  ⚠️ bash 变量名只能用 ASCII,所以变量是英文 + 中文注释
@@ -189,10 +190,50 @@ replay() {   # $1 = old/new
 log "2. 请求回放比对"
 replay old
 replay new
-if diff "$TMP/replay_old.txt" "$TMP/replay_new.txt" > "$TMP/replay.diff"; then
-  pass "$(grep -c '^### ' "$TMP/replay_new.txt") 条请求的状态码和响应体全部一致"
+# 拆分之后**有意**改动的行为(不是拆分引入的),逐条登记:请求 | 旧响应 | 新响应 | 原因
+#   不在这张表里的差异一律算失败;表里登记了但没出现的差异也报出来
+EXPECTED_DIFFS="$TMP/expected_diffs.txt"
+cat > "$EXPECTED_DIFFS" <<'EOF'
+### POST /api/v1/board/heartbeat → 200|{"ok":true,"serverTime":<毫秒>,"firmware":{"hasUpdate":false},"needFlows":false}|{"ok":true,"serverTime":<毫秒>,"firmware":{"hasUpdate":false},"needFlows":true}|优化17:上一条心跳的「乙」只有名字没内容(留底 NULL)⇒ 要求板子补报全量
+EOF
+python3 - "$TMP/replay_old.txt" "$TMP/replay_new.txt" "$EXPECTED_DIFFS" > "$TMP/replay.cmp" <<'PY'
+import sys, io
+# 按 "### " 开头切成一条条请求记录:(请求行, 响应体)
+def records(path):
+    out, cur = [], None
+    for line in io.open(path, encoding="utf-8").read().split("\n"):
+        if line.startswith("### "):
+            cur = [line, []]; out.append(cur)
+        elif cur is not None:
+            cur[1].append(line)
+    return [(h, "\n".join(b).strip()) for h, b in out]
+old, new = records(sys.argv[1]), records(sys.argv[2])
+expected = []
+for line in io.open(sys.argv[3], encoding="utf-8"):
+    if line.strip():
+        expected.append(tuple(line.rstrip("\n").split("|", 3)))
+used, bad = set(), 0
+if len(old) != len(new):
+    print("BAD 请求条数不同:旧 %d / 新 %d" % (len(old), len(new))); bad += 1
+for i, (o, n) in enumerate(zip(old, new)):
+    if o == n:
+        continue
+    hit = [k for k, e in enumerate(expected) if e[0] == o[0] == n[0] and e[1] == o[1] and e[2] == n[1]]
+    if hit:
+        used.add(hit[0]); print("EXP 第 %d 条 %s:%s" % (i + 1, o[0][4:], expected[hit[0]][3]))
+    else:
+        bad += 1; print("BAD 第 %d 条\n  旧: %s %s\n  新: %s %s" % (i + 1, o[0], o[1][:300], n[0], n[1][:300]))
+for k, e in enumerate(expected):
+    if k not in used:
+        bad += 1; print("BAD 登记的预期差异没有出现(表该更新了):%s" % e[3])
+print("SUM %d %d" % (len(new), bad))
+PY
+read -r _ n_total n_bad < <(grep '^SUM ' "$TMP/replay.cmp")
+grep '^EXP ' "$TMP/replay.cmp" | sed 's/^EXP /  · 预期差异:/'
+if [ "${n_bad:-1}" = 0 ]; then
+  pass "${n_total} 条请求的状态码和响应体一致(登记的预期差异除外)"
 else
-  fail "回放结果不一致:"; head -60 "$TMP/replay.diff"
+  fail "回放结果不一致:"; grep -v '^SUM \|^EXP ' "$TMP/replay.cmp" | sed 's/^BAD /  /' | head -60
 fi
 # 状态码分布(确认回放真的打到了各种分支,不是全 404)
 echo "  · 状态码分布:$(grep -o '→ [0-9]*' "$TMP/replay_new.txt" | sort | uniq -c | tr '\n' ' ')"
