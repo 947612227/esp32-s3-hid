@@ -14,10 +14,7 @@
 
 #include <stdint.h>
 
-// 触摸槽位数与逻辑坐标范围(Report Map 里声明的必须与此一致)
-static constexpr uint8_t TOUCH_SLOT_COUNT   = 10;
-static constexpr uint8_t TOUCH_MAX_CONTACTS = 10;
-static constexpr int32_t TOUCH_LOGICAL_MAX  = 32767;
+#include "touch_limits.h"   // TOUCH_SLOT_COUNT / TOUCH_MAX_CONTACTS / TOUCH_LOGICAL_MAX
 
 // Report ID 分配(USB 与 BLE 共用同一套)
 static constexpr uint8_t RID_TOUCHSCREEN = 1;

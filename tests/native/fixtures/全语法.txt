@@ -1,0 +1,28 @@
+# 开始
+T 50% 0.25 60 点上面
+D 0.5 0.5 90 双击
+H 16384 20000 900 长按
+S 0.5 0.8 0.5 0.2 300 上滑
+C 0.2 0.8 0.7 0.5 0.2 0.2 320 曲线
+P 0.5 0.7 0.5 0.3 0.2 300 双指
+Z 0.5 0.5 0.6 0.2 300 捏合
+K 40
+V 233
+wait 100 稍等
+waitfor 预约想看票档 10000 等预约页出现
+ifpage 支付宝
+  notify 抢到了 快去付款
+else
+  ifpage @NcovSku
+    T 0.1 0.1
+  else
+    T 0.2 0.2
+  endif
+endif
+repeat 300
+  wait 1
+  ifpage 成功
+    break 抢到了
+  endif
+endloop
+goto 开始

@@ -9,7 +9,15 @@
 // ============================================================================
 #pragma once
 
+#ifdef ARDUINO
 #include <Arduino.h>
+#else
+// 电脑上编译解析器单元测试(tests/native)时没有 Arduino,只要标准头
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+#include <strings.h>
+#endif
 
 // 单个脚本的最大步骤数
 #ifndef SCRIPT_MAX_STEPS
@@ -135,6 +143,10 @@ const char *pageText();
  */
 void utf8Truncate(char *dst, const char *src, size_t maxBytes);
 uint32_t    pageSeenAt();
+
+// 往 errBuf 里写格式化的错误原因(buf 为空或 len 为 0 时什么都不做)。
+// 解析器和引擎共用,定义在 script_parser.cpp
+void scriptSetErr(char *buf, size_t len, const char *fmt, ...);
 
 // ---------------------------------------------------------------------------
 //  一个步骤
