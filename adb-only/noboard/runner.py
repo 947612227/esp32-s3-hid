@@ -5,7 +5,7 @@ runner.py —— 动作层:把"点击某个按钮"翻译并执行
 
 核心能力:
   - 找目标:UI 树里按文字/id 找到控件,回退到最近的可点击祖先,取中心坐标
-  - 发动作:通过 Driver(adb / dry-run / 未来的 HID 板子)注入
+  - 发动作:通过 Driver(adb / dry-run / HID 板子)注入
   - 脚本:自带一套极简命令语言,批量执行并逐步反馈
 
 命令语言(CLI 与脚本共用,一行一条):
@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 from adb import Adb, AdbError
-from drivers import Driver
+from drivers import Driver, HidError
 from targets import UINode, parse_coord, parse_ui, resolve, walk
 
 
@@ -189,7 +189,7 @@ class Runner:
                 self.log(f"[cmd] {line}")
                 try:
                     self.exec_line(line)
-                except (TargetNotFound, AdbError) as e:
+                except (TargetNotFound, AdbError, HidError) as e:
                     self.log(f"  ✗ 失败:{e}")
             if round_no < loop and interval > 0:
                 self.wait(interval)

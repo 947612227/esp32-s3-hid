@@ -19,8 +19,10 @@
   python3 click.py tap 确认并知悉                # 按文字点
   python3 click.py tap 540,1150                 # 按绝对坐标点
   python3 click.py tap 50%,72%                  # 按百分比点
-  python3 click.py swipe 50%,80% 50%,20% 300    # 滑动
+  python3 click.py swipe 50%,80% 50%,20% --ms 300   # 滑动
   python3 click.py run scripts/demo.txt         # 跑脚本
+  python3 click.py --driver hid --board 10.207.182.250 --relay tap 确认并知悉
+                                                # 找控件用 adb,点击交给板子 HID
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ sys.path.insert(0, str(_HERE / "noboard"))
 sys.path.insert(0, str(_HERE))
 
 from adb import Adb, AdbError  # noqa: E402
-from drivers import AdbDriver, DryRunDriver  # noqa: E402
+from drivers import AdbDriver, DryRunDriver, HidDriver, HidError  # noqa: E402
 from runner import Runner, TargetNotFound  # noqa: E402
 
 
@@ -50,6 +52,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--adb", help="adb 可执行文件路径(默认自动探测)")
     p.add_argument("--dry-run", action="store_true",
                    help="只解析坐标并打印,不真正注入(强烈建议第一次先用它确认)")
+    p.add_argument("--driver", choices=["adb", "hid"], default="adb",
+                   help="注入方式:adb = input 命令(默认);hid = 交给 ESP32 板子做 HID 触摸")
+    p.add_argument("--board", help="--driver hid 时板子地址,如 10.207.182.250")
+    p.add_argument("--relay", action="store_true",
+                   help="--driver hid 时经手机 curl 转发(板子连在手机热点上、电脑够不着时用)")
     p.add_argument("--quiet", "-q", action="store_true", help="少打印")
     p.add_argument("--shot-dir", default="shots", help="截图保存目录")
 
@@ -129,7 +136,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"错误:{e}", file=sys.stderr)
         return 2
 
-    driver = DryRunDriver() if args.dry_run else AdbDriver(adb)
+    try:
+        if args.dry_run:
+            driver = DryRunDriver()
+        elif args.driver == "hid":
+            if not args.board:
+                print("错误:--driver hid 需要 --board <板子地址>", file=sys.stderr)
+                return 2
+            scr = adb.screen()
+            driver = HidDriver(args.board, scr.width, scr.height,
+                               relay=adb if args.relay else None)
+        else:
+            driver = AdbDriver(adb)
+    except (AdbError, HidError) as e:
+        print(f"错误:{e}", file=sys.stderr)
+        return 2
     runner = Runner(adb, driver, verbose=not args.quiet, shot_dir=args.shot_dir)
 
     if not args.quiet:
@@ -178,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"未知命令:{args.cmd}", file=sys.stderr)
             return 2
-    except (TargetNotFound, AdbError, ValueError) as e:
+    except (TargetNotFound, AdbError, HidError, ValueError) as e:
         print(f"错误:{e}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

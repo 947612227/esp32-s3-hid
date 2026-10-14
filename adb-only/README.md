@@ -42,7 +42,7 @@ adb-only/
 ├── noboard/
 │   ├── adb.py            # adb 驱动:设备/截图/UI树/屏幕信息/输入注入
 │   ├── targets.py        # UI 树解析 + 目标→坐标 + 坐标写法解析
-│   ├── drivers.py        # 注入层抽象:AdbDriver / DryRunDriver / HidDriver(占位)
+│   ├── drivers.py        # 注入层抽象:AdbDriver / DryRunDriver / HidDriver(走板子)
 │   └── runner.py         # 动作层:找目标、发动作、跑脚本
 ├── scripts/
 │   └── demo.txt          # 示例脚本(命令语法演示)
@@ -100,8 +100,8 @@ python3 click.py tap 确认并知悉               # 真的点
 ```bash
 python3 click.py tap 540,1608              # 绝对像素
 python3 click.py tap 50%,69%               # 百分比(推荐,换分辨率不用改)
-python3 click.py swipe 50%,75% 50%,30% 300 # 上滑,300ms
-python3 click.py long 50%,50% 800          # 长按 800ms
+python3 click.py swipe 50%,75% 50%,30% --ms 300 # 上滑,300ms(命令行用 --ms,脚本里直接写数字)
+python3 click.py long 50%,50% --ms 800          # 长按 800ms
 ```
 
 **第四步:一条命令串多个动作**(`;` 分隔,适合"等界面渲染后再点")
@@ -209,17 +209,32 @@ USB 调试状态、adb 授权、`input` 命令都是可被检测的信号。如�
 
 ---
 
-## 以后要接 HID 板子怎么办
+## 接 HID 板子:`--driver hid`
 
-`noboard/drivers.py` 里已经留好了 `HidDriver` 占位类。接入步骤:
+找控件、截图照旧用 adb,**只有"把动作发出去"交给板子**:板子调自己的网页接口
+`/api/gesture`(点击/长按/滑动)、`/api/control`(HOME/返回/最近任务),
+手机收到的是外接触摸屏的真实触摸,不是 `input` 命令。
 
-1. 在 `HidDriver` 里用 `pyserial` 打开板子的 UART 口;
-2. 把像素坐标换算成归一化坐标(`_norm()` 已经写好了),按板子协议发命令;
-3. 板子侧命令格式见上一级 `README.md` 第 5 节,例如点击是 `T <nx> <ny> <ms>`;
-4. 在 `click.py` 里加一个 `--driver hid --port /dev/cu.usbmodemXXX` 参数。
+```bash
+# 电脑和板子在同一个网络
+python3 click.py --driver hid --board 192.168.1.50 tap 确认并知悉
+
+# 板子连在手机热点上、电脑够不着 ⇒ 加 --relay,经手机上的 curl 转发
+python3 click.py --driver hid --board 10.207.182.250 --relay run scripts/demo.txt
+```
+
+限制(都由固件决定):
+
+- `text` 不支持:键盘接口默认编译关闭(`HID_INCLUDE_KEYBOARD=0`),而且中文输入法会把按键变成候选词;
+- `key` 只支持 `HOME` / `BACK` / `APP_SWITCH` —— 板子是**点屏幕底部三键导航栏**实现的,
+  手机要用三键导航;电源/音量走 HID 多媒体接口,默认也编译关闭,所以不映射;
+- 板子返回非 200(如 `409 HID 未就绪`)会直接报错,不会静默失败。
 
 **上层的目标解析(`targets.py`)、动作层(`runner.py`)、脚本语法全都不用改** ——
 这就是当初把 driver 抽出来的意义。
+
+测试:`python3 tests/adb_only/test_hid_driver.py`(单元,不需要设备)、
+`bash tests/adb_only/test_hid_driver_device.sh`(真机)。
 
 ---
 
