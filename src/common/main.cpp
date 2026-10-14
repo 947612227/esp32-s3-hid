@@ -19,6 +19,7 @@
 #include "led.h"
 #include "log_buffer.h"
 #include "net_manager.h"
+#include "ble_command.h"   // bleServiceSaveQueue()
 #include "script_engine.h"
 
 // ---------------------------------------------------------------------------
@@ -637,6 +638,7 @@ void loop() {
 
   // 执行 Web 端排队的一次性请求 + 定时调度(带进度上报与"停止"支持)
   netServiceScripts();
+  bleServiceSaveQueue();   // 异步落盘排队的流程保存
 
   // ---- RGB 状态灯 ----
   //  【设计】事件驱动,不是轮询:
@@ -647,7 +649,11 @@ void loop() {
   //    · setState() 内部会跳过"限时色保持期"(比如刚跑完的 5 秒绿)
   //      和"手动常亮",所以这里无脑调也不会盖掉它们
   Led::tick();
-  Led::setState(hidTransport().ready() ? Led::ST_IDLE : Led::ST_OFF);
+  // ⚠️ 用户要求:**不执行任务时灭灯**。
+  //    原来"手机连着但没跑"是红灯,用户反馈"不执行任务时不亮灯"。
+  //    所以静息态**永远是灭** —— 不再区分连没连。
+  //    (红灯这个状态就废弃了;需要确认连接看 App 上的「连接方式」即可)
+  Led::setState(Led::ST_OFF);
 
   // BOOT 键触发自检(按下沿)
   static bool lastBtn = true;

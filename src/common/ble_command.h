@@ -18,3 +18,5 @@
  * ══════════════════════════════════════════════════════════════════════
  */
 String bleHandleCommand(const String &req);
+
+void bleServiceSaveQueue();

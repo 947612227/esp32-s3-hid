@@ -10,6 +10,41 @@
 #include "led.h"
 #include "net_manager.h"
 
+// ---------------------------------------------------------------- 异步保存队列
+//  ⚠️ 为什么要有这个队列:
+//     写板子的 Flash 要 3~9 秒(实测)。而 BLE 的响应是在处理函数返回之后才发的,
+//     所以同步写会让**整条控制通道被堵几十秒** —— 一次"同步服务器"写 7 条,
+//     期间 App 连流程列表都读不出来(排队的 LIST 活活饿死)。
+//     改成:SAVE 只入队、**立刻回 ok**;主循环里再慢慢落盘。
+static const int SAVE_Q_MAX = 12;
+static String    s_saveName[SAVE_Q_MAX];
+static String    s_saveBody[SAVE_Q_MAX];
+static volatile int s_saveHead = 0, s_saveTail = 0, s_saveCount = 0;
+
+static bool queueSave(const String &name, const String &body) {
+  if (s_saveCount >= SAVE_Q_MAX) return false;
+  s_saveName[s_saveTail] = name;
+  s_saveBody[s_saveTail] = body;
+  s_saveTail = (s_saveTail + 1) % SAVE_Q_MAX;
+  s_saveCount++;
+  return true;
+}
+
+/** 主循环里调:一次落盘一条(避免长时间占着 CPU) */
+void bleServiceSaveQueue() {
+  if (s_saveCount <= 0) return;
+  String name = s_saveName[s_saveHead];
+  String body = s_saveBody[s_saveHead];
+  s_saveHead = (s_saveHead + 1) % SAVE_Q_MAX;
+  s_saveCount--;
+  char errBuf[80] = {0};
+  if (Scripts.saveFromText(name.c_str(), body.c_str(), errBuf, sizeof(errBuf))) {
+    Serial.printf("[ble] 异步落盘完成:%s\n", name.c_str());
+  } else {
+    Serial.printf("[ble] 异步落盘失败:%s — %s\n", name.c_str(), errBuf);
+  }
+}
+
 /** 把一行文本转义成 JSON 字符串(不带头尾引号) */
 static String esc(const String &in) {
   String o;
@@ -170,6 +205,13 @@ String bleHandleCommand(const String &rawReq) {
   // ---------------------------------------------------------------- 存一个流程
   //   格式:SAVE <index>\n<正文>
   //   index = -1 表示新建(正文第一行是流程名)
+  // ---------------------------------------------------------------- 异步保存
+  //  ⚠️⚠️ **SAVE 必须异步** ——
+  //     写 Flash 要 3~9 秒(实测),而 BLE 响应是在处理函数返回后才发的。
+  //     同步写的话:一次"同步服务器"要写 7 条 ⇒ 通道被堵 20~60 秒,
+  //     期间 App 连流程列表都读不出来(排队的 LIST 活活饿死)。
+  //     所以:这里只把请求排进队列、**立刻返回 ok**,
+  //     真正的落盘放到主循环里做(见 netServiceScripts 里的 pendingSave)。
   if (op == "SAVE") {
     int nl = rest.indexOf('\n');
     if (nl < 0) return err("缺少正文(SAVE <index>\\n<正文>)");
@@ -189,10 +231,10 @@ String bleHandleCommand(const String &rawReq) {
     }
     name.trim();
     if (name.isEmpty()) return err("流程名为空");
-    if (!Scripts.saveFromText(name.c_str(), body.c_str(), errBuf, sizeof(errBuf))) {
-      return err(String(errBuf));
+    if (!queueSave(name, body)) {
+      return err("保存队列满,请稍后重试");
     }
-    return "{\"ok\":true,\"message\":\"已保存 " + esc(name) + "\"}";
+    return "{\"ok\":true,\"message\":\"已接受保存 " + esc(name) + "(落盘中)\"}";
   }
 
   // ---------------------------------------------------------------- 删除
