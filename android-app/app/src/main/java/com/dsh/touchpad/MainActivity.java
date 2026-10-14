@@ -1199,12 +1199,15 @@ public class MainActivity extends Activity {
                     //    原来一失败就 removeAllViews + "读取失败",
                     //    用户看到的就是"列表空了"。
                     //    现在:保留已经显示的内容,然后**重试**。
-                    if (scriptsRetry < 3) {
+                    if (scriptsRetry < 5) {
                         scriptsRetry++;
-                        boardLog("读流程列表失败,重试 " + scriptsRetry + "/3");
+                        boardLog("读流程列表失败,重试 " + scriptsRetry + "/5");
                         ui.postDelayed(new Runnable() {
                             @Override public void run() { fetchScripts(); }
-                        }, 1200);
+                        }, 8000);      // ⚠️ 要等**8 秒** —— 同步在写流程时
+                                               //    整条 BLE 队列都被 SAVE 占着(每个
+                                               //    SAVE 写 Flash 要好几秒),等 1.2 秒
+                                               //    根本轮不到 LIST。
                         return;
                     }
                     scriptsRetry = 0;
@@ -1225,9 +1228,9 @@ public class MainActivity extends Activity {
                 // 只在数据真的变了才重绘,避免按钮位置跳动
                 // (重绘瞬间按下会把点击套到另一个按钮上,实测踩过)
                 // 读回 0 条也可能是**响应丢了**,重试几次再说
-                if (scripts.length() == 0 && scriptsRetry < 3) {
+                if (scripts.length() == 0 && scriptsRetry < 5) {
                     scriptsRetry++;
-                    boardLog("读回 0 条,重试 " + scriptsRetry + "/3");
+                    boardLog("读回 0 条,重试 " + scriptsRetry + "/5");
                     ui.postDelayed(new Runnable() {
                         @Override public void run() { fetchScripts(); }
                     }, 1200);
