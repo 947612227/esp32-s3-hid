@@ -22,6 +22,8 @@
   - 清理出错只打日志,不影响上传和启动。上传接口的响应多带一个 `pruned` 字段(删掉的 versionCode / 版本号)。
 - 测试 `tests/server/test_version_prune.sh`(临时 MySQL):上传后清理、重复 versionCode、按渠道计、策略指定的固件保留、启动时清理历史数据、文件与记录一一对应、检查更新和下载照常。
 - `tests/server/test_schema_deploy.sh`:正式库已部署过本分支时(已有 `counters`),改为期望迁移"不新增任何表"。
+- 2026-10-14 16:47 部署到正式服务器(部署前备份 `/root/touchpad-backup-20261014-164741-prune/`,含全库和 `data/apk`、`data/firmware`)。
+  启动时清掉 APK 10 个(versionCode 3~11,以及 13 较早那次上传),剩 16、15、14、13、12;固件只有 1.3.0、1.2.0 两个,未删。`data/apk` 从 2.2M 降到 776K。
 
 ### 固件
 
