@@ -231,6 +231,11 @@ String bleHandleCommand(const String &rawReq) {
     }
     name.trim();
     if (name.isEmpty()) return err("流程名为空");
+    // 入队前先同步校验(只解析不写盘,几毫秒):
+    // 以前直接回"已接受",语法错的流程在落盘时才失败,App 却以为保存成功了
+    if (!ScriptEngine::validate(name.c_str(), body.c_str(), errBuf, sizeof(errBuf))) {
+      return err(String("流程有错,未保存:") + errBuf);
+    }
     if (!queueSave(name, body)) {
       return err("保存队列满,请稍后重试");
     }

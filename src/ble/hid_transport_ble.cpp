@@ -79,6 +79,9 @@ public:
   BleHidTransport() : _serverCb(this), _charCb(this) {}
 
   bool begin() override {
+    // 控制通道收包缓冲的锁:onWrite 跑在 NimBLE 任务里,serviceControl 跑在 loop 任务里
+    _rxMtx = xSemaphoreCreateMutex();
+    if (_rxMtx == nullptr) return false;
     NimBLEDevice::init(DEVICE_NAME);
     // 默认用 Just Works 配对;如需固定 PIN,取消下面注释
     // NimBLEDevice::setSecurityPasskey(123456);
@@ -214,6 +217,9 @@ public:
     bool adv = false;
     if (NimBLEDevice::getAdvertising()) adv = NimBLEDevice::getAdvertising()->isAdvertising();
     j += ",\"advertising\":" + String(adv ? "true" : "false");
+    // 发送统计:缓冲满后重试成功的次数 / 重试用完仍失败的次数
+    j += ",\"notifyRetries\":" + String((unsigned)_notifyRetries);
+    j += ",\"notifyFails\":" + String((unsigned)_notifyFails);
     // 已绑定的地址列表
     j += ",\"bondList\":[";
     for (int i = 0; i < (int)NimBLEDevice::getNumBonds(); i++) {
@@ -252,12 +258,24 @@ public:
    *    处理命令会碰 Scripts / 文件系统 / 网络,放在蓝牙回调的任务里不安全。
    */
   void serviceControl() {
-    if (!_rxReady) return;
-    _rxReady = false;
-    String req = _rxBuf;
-    _rxBuf = "";
-    _rxWant = 0;
+    if (!_rxReady || _inControl) return;
+    // 防重入:命令处理里若间接走到 poll()(如等待钩子),不能再嵌套处理下一条
+    struct Guard { bool &b; Guard(bool &x) : b(x) { b = true; } ~Guard() { b = false; } } g(_inControl);
+    // 从"已收全"队列里取走一条请求(和 onWrite 互斥);每轮只处理一条,剩下的下一轮
+    String req;
+    uint16_t conn = BLE_HS_CONN_HANDLE_NONE;
+    xSemaphoreTake(_rxMtx, portMAX_DELAY);
+    if (_rxDoneN > 0) {
+      req = _rxDone[_rxDoneHead];
+      _rxDone[_rxDoneHead] = "";
+      conn = _rxDoneConn[_rxDoneHead];
+      _rxDoneHead = (_rxDoneHead + 1) % RX_Q_MAX;
+      _rxDoneN--;
+    }
+    _rxReady = _rxDoneN > 0;
+    xSemaphoreGive(_rxMtx);
     if (req.isEmpty()) return;
+    _ctrlConn = conn;
 
     // ⚠️ 打耗时 —— 蓝牙一次往返 2~3 秒,到底是"命令处理慢"还是"链路慢",
     //    不打点只能猜。t0 = 收到命令,t1 = 处理完,t2 = 全部发完。
@@ -281,7 +299,10 @@ public:
     //    onMTUChange 不一定被调用(NimBLE 版本/时序差异),
     //    结果就是一直按默认 23 分片,707 字节要发 37 片(实测踩过)。
     if (_server && _server->getPeerDevices().size() > 0) {
-      uint16_t h = _server->getPeerInfo((uint8_t)0).getConnHandle();
+      // 优先按"发请求的那台"的 MTU 分片(多连接时各台 MTU 可能不同)
+      uint16_t h = (_ctrlConn != BLE_HS_CONN_HANDLE_NONE)
+                       ? _ctrlConn
+                       : _server->getPeerInfo((uint8_t)0).getConnHandle();
       uint16_t m = _server->getPeerMTU(h);
       if (m > 3 && m != _peerMtu) {
         Serial.printf("[ble] MTU 实时查到 %u(缓存是 %u)\n", (unsigned)m, (unsigned)_peerMtu);
@@ -307,17 +328,17 @@ public:
       frame += (char)((sent >> 8) & 0xFF);
       frame += (char)(sent & 0xFF);
       frame += part;
-      _ctrlTx->setValue((const uint8_t *)frame.c_str(), frame.length());
-      _ctrlTx->notify();
+      // ⚠️ 必须用"带数据"的 notify(data, len, conn):它当场把这一片拷进发送缓冲。
+      //    无参的 notify() 走 ble_gatts_chr_updated(),到真正发出时才去读特征值,
+      //    下一片的 setValue 会把还没发出的上一片覆盖掉 ⇒ 丢片(以前只能靠片间 delay(30) 硬扛)。
+      //    发送缓冲满时返回失败,这里短暂退避重试。
+      if (!notifyTo(_ctrlTx, (const uint8_t *)frame.c_str(), frame.length(),
+                    _ctrlConn)) {
+        Serial.printf("[ble] 控制响应第 %u 字节处发送失败,放弃本帧\n", (unsigned)sent);
+        break;
+      }
       sent += part.length();
       if (part.length() == 0) break;      // 兜底,别死循环
-      // ⚠️⚠️ 片间必须留够时间 —— **NimBLE 的 setValue+notify 是"覆盖式"的**:
-      //      上一片还没真正发出去,下一片 setValue 就把它覆盖了 ⇒ 丢片。
-      //      App 侧表现为"帧永远收不全" ⇒ 请求超时(实测:LIST 发了 1 次、
-      //      响应丢了,流程列表一直卡在"读取中…")。
-      //      实测 6ms 和 12ms 都不够稳,提到 30ms。
-      //      代价:982 字节的日志 6 片 → 多花约 150ms,可以接受。
-      delay(30);
     }
     Serial.printf("[ble] 控制响应 %u 字节,分 %u 片(MTU %u,片头 8 字节)\n",
                   (unsigned)total, (unsigned)((total + chunk - 1) / chunk),
@@ -338,7 +359,7 @@ public:
       delay(150);
     }
     _connected = false;
-    _subCount = 0;
+    clearSubs();
     _lastNotifyOk = false;
     _lastOkMs = millis();
     NimBLEDevice::stopAdvertising();
@@ -366,19 +387,32 @@ public:
   /** 当前连接数(BLE 协议栈是权威来源,别自己维护布尔) */
   int peers() const { return _server ? (int)_server->getConnectedCount() : 0; }
 
-  /** 订阅数增减(每台手机订阅一次 Report) */
-  void addSub(int delta) {
-    int v = _subCount + delta;
-    if (v < 0) v = 0;
-    _subCount = v;
+  /**
+   * 记录/取消某个连接对触摸 Report 的订阅。
+   * 按连接句柄去重 —— 同一台手机重复上报订阅事件不会被算成两台。
+   */
+  void setSub(uint16_t conn, bool on) {
+    portENTER_CRITICAL(&_subMux);
+    int idx = -1;
+    for (int i = 0; i < _subCount; i++) if (_subHandles[i] == conn) idx = i;
+    if (on && idx < 0 && _subCount < SUB_MAX) _subHandles[_subCount++] = conn;
+    if (!on && idx >= 0) _subHandles[idx] = _subHandles[--_subCount];
+    portEXIT_CRITICAL(&_subMux);
     _connected = peers() > 0;
-    if (delta > 0) _lastOkMs = millis();
+    if (on) _lastOkMs = millis();
   }
 
-  void onPeerGone() {
-    // 只有"一台都不剩"时才真正清空状态
+  /** 某台断开:去掉它的订阅;一台都不剩时清空全部状态 */
+  void onPeerGone(uint16_t conn) {
+    setSub(conn, false);
     _connected = peers() > 0;
-    if (peers() == 0) _subCount = 0;
+    if (peers() == 0) clearSubs();
+  }
+
+  void clearSubs() {
+    portENTER_CRITICAL(&_subMux);
+    _subCount = 0;
+    portEXIT_CRITICAL(&_subMux);
   }
 
 private:
@@ -437,7 +471,7 @@ private:
     void onDisconnect(NimBLEServer *srv, NimBLEConnInfo &info,
                       int reason) override {
       (void)srv; (void)reason;
-      _owner->onPeerGone();
+      _owner->onPeerGone(info.getConnHandle());
       Serial.printf("[ble] 一台断开(%s),剩余连接数=%d 订阅数=%d\n",
                     info.getAddress().toString().c_str(),
                     _owner->peers(), (int)_owner->_subCount);
@@ -469,20 +503,43 @@ private:
       const uint8_t *d = v.data();
       size_t n = v.length();
       if (n == 0) return;
+      _t->_lastCtrlMs = millis();
 
+      xSemaphoreTake(_t->_rxMtx, portMAX_DELAY);
       // 帧头:还没拿到长度时,前 4 字节就是长度
       if (_t->_rxWant == 0) {
-        if (n < CTRL_HDR) return;
-        _t->_rxWant = ((uint32_t)d[0] << 24) | ((uint32_t)d[1] << 16) |
-                      ((uint32_t)d[2] << 8) | (uint32_t)d[3];
-        _t->_rxBuf = "";
-        _t->_rxBuf.reserve(_t->_rxWant + 8);
+        if (n < CTRL_HDR) { xSemaphoreGive(_t->_rxMtx); return; }
+        uint32_t want = ((uint32_t)d[0] << 24) | ((uint32_t)d[1] << 16) |
+                        ((uint32_t)d[2] << 8) | (uint32_t)d[3];
         d += CTRL_HDR;
         n -= CTRL_HDR;
-        if (_t->_rxWant == 0) { _t->_rxReady = true; return; }
+        if (want == 0 || want > CTRL_RX_MAX) {
+          Serial.printf("[ble] 控制帧长度非法(%u),丢弃\n", (unsigned)want);
+          xSemaphoreGive(_t->_rxMtx);
+          return;
+        }
+        _t->_rxWant = want;
+        _t->_rxConn = info.getConnHandle();
+        _t->_rxBuf = "";
+        _t->_rxBuf.reserve(want + 8);
       }
       for (size_t i = 0; i < n; i++) _t->_rxBuf += (char)d[i];
-      if ((uint32_t)_t->_rxBuf.length() >= _t->_rxWant) _t->_rxReady = true;
+      if ((uint32_t)_t->_rxBuf.length() >= _t->_rxWant) {
+        // 收全了:移交给"已收全"缓冲,立刻复位收包状态,下一条请求可以马上开始收。
+        // (以前 _rxWant 要等 loop 处理完才复位,期间到的新请求会被当成上一条的续片 ⇒ 乱帧)
+        if (_t->_rxDoneN >= RX_Q_MAX) {
+          Serial.println(F("[ble] 待处理控制请求已满,新请求被丢弃"));
+        } else {
+          int tail = (_t->_rxDoneHead + _t->_rxDoneN) % RX_Q_MAX;
+          _t->_rxDone[tail] = _t->_rxBuf;
+          _t->_rxDoneConn[tail] = _t->_rxConn;
+          _t->_rxDoneN++;
+          _t->_rxReady = true;
+        }
+        _t->_rxBuf = "";
+        _t->_rxWant = 0;
+      }
+      xSemaphoreGive(_t->_rxMtx);
     }
 
     void onSubscribe(NimBLECharacteristic *ch, NimBLEConnInfo &info,
@@ -503,7 +560,6 @@ private:
 
     void onSubscribe(NimBLECharacteristic *chr, NimBLEConnInfo &info,
                      uint16_t subValue) override {
-      (void)info;
       if (chr == nullptr) return;
       if (chr->getUUID() == NimBLEUUID(UUID_HID_CONTROL)) {
         auto val = chr->getValue();
@@ -515,7 +571,7 @@ private:
       }
       // subValue 位 0 = Notify,位 1 = Indicate
       bool on = (subValue & 0x01) != 0;
-      _owner->addSub(on ? 1 : -1);
+      _owner->setSub(info.getConnHandle(), on);
       Serial.printf("[ble] Report %s(订阅数=%d,连接数=%d)\n",
                     on ? "已订阅 → 可以发数据" : "取消订阅",
                     _owner->_subCount, _owner->peers());
@@ -560,26 +616,74 @@ private:
     if (len > sizeof(wire) - 1) return false;
     wire[0] = reportId;
     memcpy(wire + 1, data, len);
-    ch->setValue(wire, len + 1);
-    // notify() 在"没有已连接 peer"时会静默返回 true(实现里是遍历 peer 发送,
-    // 空列表就不发也不报错)。所以这里额外打印 peer 数与返回值,避免误判成功。
-    bool ok = ch->notify();
+    ch->setValue(wire, len + 1);   // 只为了让 READ 读到最新值
+
+    // 逐个发给"已订阅触摸 Report"的连接。
+    // ⚠️ 带数据的 notify 不检查 CCCD,所以不能用 BLE_HS_CONN_HANDLE_NONE(会发给
+    //    只连了控制通道、没订阅 HID 的 App 连接);只发给自己记录的订阅句柄。
+    // ⚠️ 以前的无参 notify() 走 ble_gatts_chr_updated(),永远返回成功,
+    //    而且连续两帧会互相覆盖(按下/抬起帧丢失 ⇒ 卡手指)。
+    uint16_t hs[SUB_MAX];
+    int n = 0;
+    portENTER_CRITICAL(&_subMux);
+    for (int i = 0; i < _subCount; i++) hs[n++] = _subHandles[i];
+    portEXIT_CRITICAL(&_subMux);
+
+    bool ok = n > 0;
+    for (int i = 0; i < n; i++) {
+      if (!notifyTo(ch, wire, len + 1, hs[i])) ok = false;
+    }
     _lastNotifyOk = ok;
-    if (!ok) {
-      Serial.printf("[ble] notify FAILED peers=%d len=%u\n",
-                    (int)(_server ? _server->getConnectedCount() : -1),
+    if (ok) _lastOkMs = millis();
+    else {
+      Serial.printf("[ble] notify 失败 订阅数=%d 连接数=%d len=%u\n", n, peers(),
                     (unsigned)(len + 1));
     }
     return ok;
+  }
+
+  /**
+   * 带数据发一条通知给指定连接,发送缓冲满(ENOMEM)时退避重试。
+   * 返回 false = 重试用完仍失败(多半是链路已断)。
+   */
+  bool notifyTo(NimBLECharacteristic *ch, const uint8_t *data, size_t len,
+                uint16_t conn) {
+    if (ch == nullptr) return false;
+    // 退避:1,2,4,8,16,16... ms,总计约 100ms
+    uint32_t wait = 1;
+    for (int attempt = 0; attempt < 9; attempt++) {
+      if (ch->notify(data, len, conn)) {
+        if (attempt > 0) _notifyRetries += attempt;
+        return true;
+      }
+      // 连接已经不在了就别白等(断开回调可能还没来得及清掉句柄)
+      if (conn != BLE_HS_CONN_HANDLE_NONE && ble_gap_conn_find(conn, nullptr) != 0) break;
+      delay(wait);
+      if (wait < 16) wait *= 2;
+    }
+    _notifyFails++;
+    return false;
   }
 
   NimBLEServer         *_server = nullptr;
   // ---- 控制通道 ----
   NimBLECharacteristic *_ctrlTx = nullptr;   // 板子 → App(notify)
   CtrlCallbacks         _ctrlCb{this};
-  String                _rxBuf;              // 收包缓冲
+  SemaphoreHandle_t     _rxMtx = nullptr;    // 保护下面的收包状态
+  String                _rxBuf;              // 正在拼的帧
   uint32_t              _rxWant = 0;         // 本帧总长度(0 = 还没收到帧头)
-  volatile bool         _rxReady = false;    // 收全了,等 loop 处理
+  uint16_t              _rxConn = BLE_HS_CONN_HANDLE_NONE;      // 正在拼的帧来自哪个连接
+  // 已收全、等 loop 处理的请求(小环形队列;多台手机/重试时可能连着到好几条)
+  static constexpr int  RX_Q_MAX = 4;
+  String                _rxDone[RX_Q_MAX];
+  uint16_t              _rxDoneConn[RX_Q_MAX] = {};  // 各条来自哪个连接
+  int                   _rxDoneHead = 0;
+  int                   _rxDoneN = 0;
+  volatile bool         _rxReady = false;    // 队列非空
+  uint16_t              _ctrlConn = BLE_HS_CONN_HANDLE_NONE;    // 当前在回复的连接
+  volatile uint32_t     _lastCtrlMs = 0;     // 最近一次收到控制通道数据
+  bool                  _inControl = false;  // 正在处理控制命令(防重入)
+  static constexpr uint32_t CTRL_RX_MAX = 64 * 1024;  // 单条请求上限(防坏帧头撑爆内存)
   uint16_t              _peerMtu = 23;       // 协商到的 MTU
   NimBLECharacteristic *_chTouch = nullptr;
   NimBLECharacteristic *_chKeyboard = nullptr;
@@ -591,7 +695,12 @@ private:
   //    实测踩过:手机连着、Mac 又连一台,Mac 一断开就把状态清成"未连接",
   //    虽然手机还在(peers=1)→ 手机的触摸注入直接失效。
   //    所以按"连接数 / 订阅数"计数,只要还有一台可用就算就绪。
-  volatile int          _subCount = 0;     // 已订阅 Report 的客户端数
+  static constexpr int  SUB_MAX = CONFIG_BT_NIMBLE_MAX_CONNECTIONS;
+  portMUX_TYPE          _subMux = portMUX_INITIALIZER_UNLOCKED;
+  uint16_t              _subHandles[SUB_MAX] = {};  // 已订阅触摸 Report 的连接句柄
+  volatile int          _subCount = 0;     // 已订阅 Report 的客户端数(= _subHandles 有效个数)
+  volatile uint32_t     _notifyRetries = 0;  // 发送缓冲满、重试成功的次数(统计用)
+  volatile uint32_t     _notifyFails = 0;    // 重试用完仍失败的次数(统计用)
   volatile bool         _connected = false;  // 派生值,仅用于展示/看门狗
   volatile bool         _lastNotifyOk = true;
   volatile uint32_t     _lastOkMs = 0;      // 最近一次成功(连接/订阅/发送)
@@ -604,42 +713,48 @@ public:
    * (HID connection state=0),于是板子**不再广播** → 手机永远连不上,
    * 只能重启板子。这个状态在反复配对/解绑时特别容易出现。
    *
-   * 对策:如果自称已连接,但连续 N 秒既没有订阅也没有成功发送,就
-   * 判定为"假连接",主动断开并重新广播。
+   * 对策:如果自称已连接,但连续 60 秒既没有 HID 订阅、也没有控制通道流量,
+   * 就判定为"假连接",主动断开并重新广播。
+   *
+   * ⚠️ "HID 已订阅"本身就算健康:手机放着不动时不会有任何触摸发送,
+   *    以前只看"最近成功发送"⇒ 空闲 60 秒就把好好的连接踢掉。
+   *    链路真的断了,协议栈的监督超时(4 秒)会让连接数自己掉下来。
    */
-  void tick() { _tickBody(); }
+  void tick() {
+    if (!_ok) return;
+    // 控制通道每轮都处理 —— 以前放在 5 秒节流里面,
+    // App 每条请求平均要白等 2.5 秒才被处理(实测"一次往返 2~3 秒"的根因)
+    serviceControl();
+    _tickBody();
+  }
 
 private:
   uint32_t              _lastTickMs = 0;
   void _tickBody() {
-    if (!_ok) return;
     uint32_t now = millis();
-    if (now - _lastTickMs < 5000) return;      // 5 秒检查一次
+    if (now - _lastTickMs < 5000) return;      // 看门狗 5 秒检查一次
     _lastTickMs = now;
 
-    if (peers() == 0) {
-      // 没连接就一定在广播状态;如果广播掉了,补一次
-      if (NimBLEDevice::getAdvertising() &&
-          !NimBLEDevice::getAdvertising()->isAdvertising()) {
-        NimBLEDevice::startAdvertising();
-        Serial.println(F("[ble] 看门狗:广播掉了,已重新开始"));
-      }
-      return;
+    // 还有空位却没在广播(如断开回调里重启广播失败),补一次
+    if (peers() < CONFIG_BT_NIMBLE_MAX_CONNECTIONS && NimBLEDevice::getAdvertising() &&
+        !NimBLEDevice::getAdvertising()->isAdvertising()) {
+      NimBLEDevice::startAdvertising();
+      Serial.println(F("[ble] 看门狗:广播掉了,已重新开始"));
     }
+    if (peers() == 0) return;
 
-    // ---- 控制通道:处理收到的命令 ----
-    serviceControl();
-
-    // 自称连着:看有没有实际流量
+    if (_subCount > 0) { _lastOkMs = now; return; }        // HID 已订阅 = 健康
+    if (now - _lastCtrlMs < 60000UL) return;               // 控制通道最近有流量 = 健康
     if (_lastOkMs == 0) _lastOkMs = now;
     if (now - _lastOkMs > 60000UL) {
-      Serial.printf("[ble] 看门狗:60 秒无流量,判定为假连接,断开全部 %d 台\n", peers());
+      Serial.printf("[ble] 看门狗:60 秒无订阅也无控制流量,判定为假连接,断开全部 %d 台\n",
+                    peers());
       for (int i = peers() - 1; i >= 0; i--) {
         if (_server) _server->disconnect(_server->getPeerInfo((uint8_t)i).getConnHandle());
         delay(150);
       }
       _connected = false;
-      _subCount = 0;
+      clearSubs();
       delay(200);
       NimBLEDevice::startAdvertising();
       _lastOkMs = millis();

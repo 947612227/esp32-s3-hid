@@ -804,6 +804,27 @@ void ScriptEngine::forEach(void (*cb)(const Script &, void *ctx),
   for (uint8_t i = 0; i < _count; i++) cb(_scripts[i], ctx);
 }
 
+bool ScriptEngine::validate(const char *name, const char *text,
+                            char *errBuf, size_t errLen) {
+  if (errBuf && errLen) errBuf[0] = '\0';
+  if (name == nullptr || *name == '\0') {
+    setErr(errBuf, errLen, "脚本名不能为空"); return false;
+  }
+  if (strlen(name) >= SCRIPT_NAME_LEN) {
+    setErr(errBuf, errLen, "脚本名过长(最多 %d 字符)", SCRIPT_NAME_LEN - 1);
+    return false;
+  }
+  if (strchr(name, '/') || strchr(name, '\\')) {
+    setErr(errBuf, errLen, "脚本名不能含路径分隔符"); return false;
+  }
+  // 临时对象放堆上(见 saveFromText 里的说明)
+  Script *tmp = (Script *)calloc(1, sizeof(Script));
+  if (!tmp) { setErr(errBuf, errLen, "内存不足"); return false; }
+  bool ok = parse(text, *tmp, errBuf, errLen);
+  free(tmp);
+  return ok;
+}
+
 bool ScriptEngine::saveFromText(const char *name, const char *text,
                                 char *errBuf, size_t errLen) {
   if (errBuf && errLen) errBuf[0] = '\0';

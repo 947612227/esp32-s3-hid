@@ -218,6 +218,9 @@ public:
   // 解析文本到 Script(不落盘),用于校验
   static bool parse(const char *text, Script &out, char *errBuf, size_t errLen);
 
+  // 只校验"名字 + 正文"能不能保存(不落盘),异步保存入队前先调它
+  static bool validate(const char *name, const char *text, char *errBuf, size_t errLen);
+
 private:
   Script  _scripts[SCRIPT_MAX_SCRIPTS];
   uint8_t _count = 0;
