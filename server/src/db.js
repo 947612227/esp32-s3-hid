@@ -51,16 +51,23 @@ async function run(sql, params) {
 }
 
 /**
- * 建表(幂等)。
- * 直接把 sql/schema.sql 跑一遍 —— CREATE TABLE IF NOT EXISTS 是安全的。
+ * 建库 + 建表(幂等)。
+ * 先按 DB_NAME 建库并切过去,再把 sql/schema.sql 跑一遍 —— CREATE TABLE IF NOT EXISTS 是安全的。
+ * 老库缺的列由 src/migrate.js 补(boot 里紧接着调用)。
  */
 async function initSchema() {
   const f = path.join(__dirname, '..', 'sql', 'schema.sql');
   const sqlText = fs.readFileSync(f, 'utf8');
 
-  // mysql2 默认不允许一次多条语句,这里用 multipleStatements 的独立连接
-  const conn = await mysql.createConnection({ ...DB, multipleStatements: true });
+  // mysql2 默认不允许一次多条语句,这里用 multipleStatements 的独立连接;
+  // 不带 database 连接,库不存在时也能先建出来
+  const { database, ...noDb } = DB;
+  const conn = await mysql.createConnection({ ...noDb, multipleStatements: true });
   try {
+    const name = conn.escapeId(database);
+    await conn.query(
+      `CREATE DATABASE IF NOT EXISTS ${name} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+    await conn.query(`USE ${name}`);
     await conn.query(sqlText);
   } finally {
     await conn.end();

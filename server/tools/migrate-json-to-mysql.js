@@ -28,6 +28,7 @@ function readJsonl(name) {
 
 async function main() {
   await db.initSchema();
+  await require('../src/migrate').migrate();
   let n = 0;
 
   // ---- 板子

@@ -1450,6 +1450,7 @@ app.get('/', (req, res) => res.redirect('/admin/'));
 async function boot() {
   console.log('初始化数据库…');
   await db.initSchema();
+  await require('./src/migrate').migrate();
 
   boardToken = await db.getSetting('boardToken', '');
   appToken = await db.getSetting('appToken', '');

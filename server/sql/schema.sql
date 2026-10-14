@@ -1,10 +1,14 @@
 -- ============================================================================
---  触摸注入板 · 控制中心 数据库结构
+--  触摸注入板 · 控制中心 数据库结构(全新部署的基线)
 --  MySQL 8.0 / utf8mb4(支持中文和 emoji)
+--
+--  ⚠️ 这里**不写** CREATE DATABASE / USE:
+--     库名由 DB_NAME 决定,db.initSchema() 会先建库再切过去。
+--     以前写死了 `USE touchpad`,换个 DB_NAME 跑也会把表建进正式库。
+--
+--  ⚠️ 已有库的结构变更**不要**只改这里(CREATE TABLE IF NOT EXISTS 不会给老表加列),
+--     要同时在 sql/migrations/ 里加一个迁移(见 src/migrate.js)。
 -- ============================================================================
-CREATE DATABASE IF NOT EXISTS touchpad
-  CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE touchpad;
 
 -- ---------------------------------------------------------------- 账号
 CREATE TABLE IF NOT EXISTS users (
@@ -59,7 +63,31 @@ CREATE TABLE IF NOT EXISTS boards (
   wifi_pass_enc TEXT,                                  -- AES-256-GCM 密文
   first_seen    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   last_seen     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  pub_ip        VARCHAR(45)  DEFAULT NULL COMMENT '板子所在网络的公网 IP(服务端从心跳源地址取)',
+  geo_country   VARCHAR(32)  DEFAULT NULL,
+  geo_region    VARCHAR(64)  DEFAULT NULL,
+  geo_city      VARCHAR(64)  DEFAULT NULL,
+  geo_isp       VARCHAR(96)  DEFAULT NULL,
+  geo_lat       DOUBLE       DEFAULT NULL,
+  geo_lon       DOUBLE       DEFAULT NULL,
+  geo_at        DATETIME     DEFAULT NULL COMMENT '地理信息最后更新时间',
+  link_mode     VARCHAR(16)  DEFAULT NULL COMMENT 'App 报告:当前是怎么连的(ble/usb/wifi/组合)',
+  link_hid      VARCHAR(64)  DEFAULT NULL COMMENT 'HID 输入设备名',
+  link_by       VARCHAR(64)  DEFAULT NULL COMMENT '哪个手机报的',
+  link_at       DATETIME     DEFAULT NULL COMMENT '连接方式最后上报时间',
   INDEX (last_seen)
+) ENGINE=InnoDB;
+
+-- 板子事件(流程里的 notify 步骤等上报的消息)
+CREATE TABLE IF NOT EXISTS board_events (
+  id      BIGINT AUTO_INCREMENT PRIMARY KEY,
+  mac     VARCHAR(32)  NOT NULL,
+  type    VARCHAR(32)  NOT NULL DEFAULT 'flow_event',
+  flow    VARCHAR(64)  DEFAULT NULL,
+  message VARCHAR(255) NOT NULL,
+  at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_mac_at (mac, at),
+  KEY idx_at (at)
 ) ENGINE=InnoDB;
 
 -- 板子上报过的 IP(排查"为什么连不上"很有用)
@@ -156,6 +184,20 @@ CREATE TABLE IF NOT EXISTS audit_log (
 ) ENGINE=InnoDB;
 
 -- ---------------------------------------------------------------- 流程 / 定时
+-- 流程主表(服务器为权威,App 按 ver 增量同步)
+CREATE TABLE IF NOT EXISTS flows (
+  owner      VARCHAR(64) NOT NULL COMMENT '归属:现在=App的deviceId,以后=用户id',
+  name       VARCHAR(64) NOT NULL COMMENT '流程名',
+  text       MEDIUMTEXT  COMMENT '流程正文(tap/swipe/wait...)',
+  meta       JSON        DEFAULT NULL COMMENT '状态:enabled/定时/频率/绑定App/重复次数',
+  status     VARCHAR(16) NOT NULL DEFAULT 'enabled' COMMENT 'enabled=可下载 / disabled=不可下载(客户端应移除) / deleted=已删除',
+  ver        BIGINT      NOT NULL DEFAULT 1 COMMENT '版本号,每次改+1',
+  deleted    TINYINT     NOT NULL DEFAULT 0 COMMENT '软删除:1=已删',
+  updated_at DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (owner, name),
+  KEY idx_owner_ver (owner, ver)
+) ENGINE=InnoDB COMMENT='流程主表(服务器为权威)';
+
 -- 板子上有哪些流程(心跳时上报名字)
 CREATE TABLE IF NOT EXISTS board_flows (
   mac   VARCHAR(32) NOT NULL,
