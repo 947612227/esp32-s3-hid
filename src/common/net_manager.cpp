@@ -1377,7 +1377,7 @@ static void hbSend() {
 
   // 流程**名字**列表(服务端看板要显示,不能只有数量)
   String flowsPart = "\"flowNames\":[";
-  for (uint8_t i = 0; i < Scripts.count() && i < 20; i++) {
+  for (uint8_t i = 0; i < Scripts.count(); i++) {   // 全部上报(以前只报前 20 个)
     const Script *sc = Scripts.at(i);
     if (!sc) continue;
     if (i) flowsPart += ",";
@@ -1389,7 +1389,7 @@ static void hbSend() {
   // 流程**内容**也一起上报 —— 服务端留底,万一被误删可以恢复。
   // (实测踩过:自动化点击误触「删除」,流程就没了)
   flowsPart += "\"flowTexts\":{";
-  for (uint8_t i = 0; i < Scripts.count() && i < 20; i++) {
+  for (uint8_t i = 0; i < Scripts.count(); i++) {   // 全部上报(以前只报前 20 个)
     const Script *sc = Scripts.at(i);
     if (!sc) continue;
     if (i) flowsPart += ",";

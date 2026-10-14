@@ -236,6 +236,9 @@ String bleHandleCommand(const String &rawReq) {
     if (!ScriptEngine::validate(name.c_str(), body.c_str(), errBuf, sizeof(errBuf))) {
       return err(String("流程有错,未保存:") + errBuf);
     }
+    if (Scripts.fullFor(name.c_str())) {
+      return err("流程数已达上限 " + String((int)Scripts.capacity()) + " 个,请先删掉不用的");
+    }
     if (!queueSave(name, body)) {
       return err("保存队列满,请稍后重试");
     }

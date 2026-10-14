@@ -13,6 +13,7 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <ctype.h>
+#include <esp_heap_caps.h>
 
 #include "hid_touch.h"
 #include "hid_report_map.h"
@@ -614,6 +615,14 @@ void setup() {
   }
 
   printHelp();
+
+  // 内存概况(直接查 heap_caps,不依赖 psramFound —— 没定义 BOARD_HAS_PSRAM 时它恒为 false)
+  LOGF("[boot] 内存:内部 空闲 %u / 共 %u KB(最大块 %u KB),PSRAM 空闲 %u / 共 %u KB",
+       (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+       (unsigned)(heap_caps_get_total_size(MALLOC_CAP_INTERNAL) / 1024),
+       (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) / 1024),
+       (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
+       (unsigned)(heap_caps_get_total_size(MALLOC_CAP_SPIRAM) / 1024));
 
 #if EJ_TOUCH_DEMO
   Serial.println(F("[demo] 自动演示手势..."));

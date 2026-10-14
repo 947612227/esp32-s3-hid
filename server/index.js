@@ -263,7 +263,7 @@ app.get('/api/v1/board/health', (req, res) => json(res, 200, { ok: true, ts: Dat
 async function syncBoardFlows(mac, names, texts) {
   const tx = (texts && typeof texts === 'object') ? texts : {};
   const wanted = [];                         // 去重、截断后的新名字列表
-  for (const n of names.slice(0, 30)) {
+  for (const n of names.slice(0, 64)) {   // 固件上限 32 个,留余量
     const nm = String(n || '').slice(0, 64);
     if (nm && !wanted.includes(nm)) wanted.push(nm);
   }

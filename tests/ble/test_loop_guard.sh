@@ -9,66 +9,7 @@
 # 用法: bash tests/ble/test_loop_guard.sh [串口日志文件]
 set -u
 SERIAL_LOG=${1:-/tmp/serial.log}   # 串口日志文件
-APP=/tmp/BleRtt.app                # 蓝牙测试客户端
-OUT=/tmp/loop_guard_ble.out        # 单次命令的输出
-FAIL=0                             # 失败用例数
-
-# 通过蓝牙控制通道发一条命令,打印回包正文
-ble_cmd() {
-  rm -f "$OUT"
-  open -n -W --stdout "$OUT" --stderr "$OUT" "$APP" --args 1 "cmd=$1"
-  sed -n 's/^回包内容://p' "$OUT"
-}
-
-# 按名字查流程序号(LIST 返回 JSON)
-flow_index() {
-  ble_cmd "LIST" | python3 -c '
-import json,sys
-name=sys.argv[1]
-for s in json.load(sys.stdin)["scripts"]:
-    if s["name"]==name: print(s["index"]); break' "$1"
-}
-
-# 等串口日志里从第 $1 行之后出现匹配 $3 的行,最多等 $2 秒;打印那一行
-wait_log() {
-  local from=$1 limit=$2 pat=$3 i line
-  for ((i = 0; i < limit * 10; i++)); do
-    line=$(tail -n +"$((from + 1))" "$SERIAL_LOG" | grep -m1 -- "$pat")
-    if [ -n "$line" ]; then echo "$line"; return 0; fi
-    sleep 0.1
-  done
-  return 1
-}
-# 等流程跑完(net 层的"执行结束",不是 LED 的那条)
-wait_run_end() { wait_log "$1" "$2" "\[net\] 执行结束"; }
-
-check() {   # check <描述> <条件结果 0/1>
-  if [ "$2" = 0 ]; then echo "  ✅ $1"; else echo "  ❌ $1"; FAIL=$((FAIL + 1)); fi
-}
-
-# 保存一个流程,返回回包;接受了就等它真正落盘(否则紧接着的 LIST 拿到的序号是旧的)
-save_flow() {   # save_flow <名字> <正文(用 \n 分行)>
-  local from r
-  from=$(wc -l < "$SERIAL_LOG")
-  r=$(ble_cmd "SAVE -1\\n$1\\n$2")
-  echo "$r"
-  if echo "$r" | grep -q '"ok":true'; then
-    wait_log "$from" 30 "异步落盘完成:$1" > /dev/null || echo "  ⚠️ 30 秒内没落盘"
-  fi
-}
-
-# 跑一个流程直到结束,输出"<结束行>|<耗时ms>"
-run_flow() {    # run_flow <名字> <最多等几秒>
-  local idx from t0 t1 line
-  idx=$(flow_index "$1")
-  [ -z "$idx" ] && { echo "找不到流程|0"; return; }
-  from=$(wc -l < "$SERIAL_LOG")
-  t0=$(python3 -c 'import time;print(int(time.time()*1000))')
-  ble_cmd "RUN $idx" > /dev/null
-  line=$(wait_run_end "$from" "$2")
-  t1=$(python3 -c 'import time;print(int(time.time()*1000))')
-  echo "${line}|$((t1 - t0))"
-}
+source "$(dirname "$0")/lib.sh"
 
 echo "===== 1. 解析器:repeat 次数范围 ====="
 r=$(save_flow "优化5_超限" "repeat 70000\\nwait 1\\nendloop")
@@ -108,10 +49,10 @@ idx=$(flow_index "优化5_无等待点击")
 from=$(wc -l < "$SERIAL_LOG")
 ble_cmd "RUN $idx" > /dev/null
 sleep 3
-t0=$(python3 -c 'import time;print(int(time.time()*1000))')
+t0=$(now_ms)
 echo "  STOP 回包: $(ble_cmd STOP)"
 line=$(wait_run_end "$from" 15)
-t1=$(python3 -c 'import time;print(int(time.time()*1000))')
+t1=$(now_ms)
 echo "  结果: $line  (发 STOP 到结束 $((t1 - t0)) ms,含蓝牙连接)"
 echo "$line" | grep -q "被用户中止"; check "被用户中止" $?
 started=$(wait_log "$from" 1 "\[script\] 执行 \[")
@@ -123,5 +64,4 @@ for n in 优化5_长循环 优化5_空转 优化5_无等待点击; do
   echo "  DEL $n: $(ble_cmd "DEL $n")"
 done
 
-echo
-if [ "$FAIL" = 0 ]; then echo "全部通过"; else echo "失败 $FAIL 项"; exit 1; fi
+finish

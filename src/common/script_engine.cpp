@@ -5,6 +5,7 @@
 #include "led.h"   // 流程开始/结束要改状态灯
 
 #include <LittleFS.h>
+#include <esp_heap_caps.h>
 
 #include "hid_touch.h"
 #include "log_buffer.h"
@@ -297,7 +298,7 @@ bool ScriptEngine::parse(const char *text, Script &out, char *errBuf,
   bool failed = false;
   bool skipNote = false;      // waitfor/ifpage 这类"关键字即备注"的指令用
 
-  while (*p && out.stepCount < SCRIPT_MAX_STEPS && !failed) {
+  while (*p && !failed) {
     const char *eol = strchr(p, '\n');
     size_t len = eol ? (size_t)(eol - p) : strlen(p);
 
@@ -571,6 +572,13 @@ bool ScriptEngine::parse(const char *text, Script &out, char *errBuf,
       }
     }
 
+    // ⚠️ 以前循环条件里直接 stepCount < 上限 —— 超出的步骤被**默默丢掉**,保存却显示成功
+    if (out.stepCount >= SCRIPT_MAX_STEPS) {
+      setErr(errBuf, errLen, "第 %u 行:步骤太多(每个流程最多 %d 步)", lineNo,
+             SCRIPT_MAX_STEPS);
+      failed = true;
+      break;
+    }
     out.steps[out.stepCount] = st;
     out.stepCount++;
   }
@@ -723,6 +731,27 @@ static bool isControlOnly(StepOp op) {
 }
 
 bool ScriptEngine::begin() {
+  // 脚本表:优先 PSRAM;没有 PSRAM(或分配失败)退回内部 RAM,容量缩小
+  if (_scripts == nullptr) {
+    _scripts = (Script *)heap_caps_calloc(SCRIPT_MAX_SCRIPTS, sizeof(Script),
+                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (_scripts) {
+      _capacity = SCRIPT_MAX_SCRIPTS;
+      LOGF("%s 脚本表在 PSRAM:%u 个 × %u 步(%u KB)", TAG, (unsigned)_capacity,
+           (unsigned)SCRIPT_MAX_STEPS, (unsigned)(sizeof(Script) * _capacity / 1024));
+    } else {
+      _scripts = (Script *)heap_caps_calloc(SCRIPT_MAX_SCRIPTS_NO_PSRAM, sizeof(Script),
+                                            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      if (_scripts) _capacity = SCRIPT_MAX_SCRIPTS_NO_PSRAM;
+      LOGF("%s ⚠️ 没有可用 PSRAM,脚本表退回内部 RAM,最多 %u 个流程", TAG,
+           (unsigned)_capacity);
+    }
+    if (_scripts == nullptr) {
+      LOGF("%s 脚本表分配失败(内存不足)", TAG);
+      return false;
+    }
+  }
+
   // 先尝试挂载(不自动格式化)。空白分区首次挂载会失败,这时显式格式化再挂载。
   // 之前用 begin(true) 会在空白分区上"看似成功但容量为 0",所以改成显式流程。
   _mounted = LittleFS.begin();
@@ -778,12 +807,14 @@ bool ScriptEngine::reload() {
     return false;
   }
 
-  for (File f = dir.openNextFile(); f && _count < SCRIPT_MAX_SCRIPTS;
-       f = dir.openNextFile()) {
+  uint8_t overCap = 0;   // 超出容量没载入的文件数
+  for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
     if (f.isDirectory()) continue;
 
     String fname = f.name();
     if (!fname.endsWith(".txt")) continue;
+    // ⚠️ 以前满了就默默不读了 —— 文件在 Flash 上,列表里却看不到
+    if (_count >= _capacity) { overCap++; continue; }
 
     int slash = fname.lastIndexOf('/');
     String base = (slash >= 0) ? fname.substring(slash + 1) : fname;
@@ -805,6 +836,10 @@ bool ScriptEngine::reload() {
   }
   dir.close();
   LOGF("%s 可用脚本 %u 个", TAG, (unsigned)_count);
+  if (overCap) {
+    LOGF("%s ⚠️ 还有 %u 个流程文件超出容量(最多 %u 个)没有载入", TAG,
+         (unsigned)overCap, (unsigned)_capacity);
+  }
   return true;
 }
 
@@ -863,12 +898,18 @@ bool ScriptEngine::saveFromText(const char *name, const char *text,
   }
 
   // ⚠️ 这个临时对象必须放**堆**上,不能放栈上。
-  //    一个 Script 是 SCRIPT_MAX_STEPS × ~100 字节 —— 48 步就是 4.9KB,
-  //    而 Arduino 的 loop 任务栈默认只有 8KB(WebServer 回调就跑在里面)。
-  //    实测:改成 48 步之后 /api/save **必然断连**,其它 POST 却都正常。
+  //    一个 Script 是 SCRIPT_MAX_STEPS × ~100 字节(128 步 ≈ 12.9KB),
+  //    而 loop 任务栈只有 16KB(WebServer 回调就跑在里面)。
+  //    实测:48 步(4.9KB)放栈上时 /api/save 就**必然断连**。
+  //    calloc ≥4KB 会自动走 PSRAM(CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096)。
   Script *tmp = (Script *)calloc(1, sizeof(Script));
   if (!tmp) { setErr(errBuf, errLen, "内存不足"); return false; }
   if (!parse(text, *tmp, errBuf, errLen)) { free(tmp); return false; }   // 先校验
+  if (fullFor(name)) {
+    setErr(errBuf, errLen, "流程数已达上限 %u 个,请先删掉不用的", (unsigned)_capacity);
+    free(tmp);
+    return false;
+  }
 
   String path = String(SCRIPT_DIR) + "/" + name + ".txt";
   File f = LittleFS.open(path, "w");
@@ -1130,8 +1171,17 @@ ScriptResult ScriptEngine::run(uint8_t index, StepHook hook,
   //    否则"运行中黄"一闪而过(实测用户根本看不到)。
   const uint32_t ledRunT0 = millis();
 
-  // Repeat 步骤需要在执行期保存剩余次数,所以复制一份步骤到栈上/局部
-  ScriptStep steps[SCRIPT_MAX_STEPS];
+  // 执行期复制一份步骤(执行中改写/重载脚本表不影响正在跑的这份)。
+  // ⚠️ 放堆上(≥4KB 自动走 PSRAM):128 步 ≈ 12.9KB,放栈上 16KB 的 loop 栈就爆了
+  struct StepCopy {
+    ScriptStep *p;
+    ~StepCopy() { free(p); }
+  } copy{(ScriptStep *)malloc(sizeof(ScriptStep) * (sc->stepCount ? sc->stepCount : 1))};
+  if (copy.p == nullptr) {
+    setErr(res.error, sizeof(res.error), "内存不足,无法执行");
+    return res;
+  }
+  ScriptStep *steps = copy.p;
   memcpy(steps, sc->steps, sizeof(ScriptStep) * sc->stepCount);
   uint16_t repeatLeft[SCRIPT_MAX_STEPS] = {0};
 

@@ -16,13 +16,19 @@
 // 单个流程最多多少步。
 // ⚠️ 32 步对"ifpage 安全版"不够用 —— 每次点击都要包一层
 //    ifpage / else / endif(3 步),11 步的流程会膨胀到 40+ 步。
-//    48 步 × 16 个流程 ≈ 75KB,板子还有 120KB+ 空闲,放得下。
-#define SCRIPT_MAX_STEPS 48
+//    脚本表放 PSRAM(8MB)后:128 步 × 32 个流程 ≈ 410KB,只占 PSRAM 的 5%。
+//    ⚠️ 上限 255:步骤下标 / stepCount 都是 uint8_t
+#define SCRIPT_MAX_STEPS 128
 #endif
 
 // 最多同时载入的脚本数
 #ifndef SCRIPT_MAX_SCRIPTS
-#define SCRIPT_MAX_SCRIPTS 16
+#define SCRIPT_MAX_SCRIPTS 32
+#endif
+
+// 没有 PSRAM 时退回内部 RAM,只能放这么多个(一个 Script ≈ 12.9KB)
+#ifndef SCRIPT_MAX_SCRIPTS_NO_PSRAM
+#define SCRIPT_MAX_SCRIPTS_NO_PSRAM 4
 #endif
 
 // 单个脚本名长度上限(含结尾 0)
@@ -174,6 +180,10 @@ public:
 
   bool mounted() const { return _mounted; }
   uint8_t count() const { return _count; }
+  // 脚本表容量(有 PSRAM = SCRIPT_MAX_SCRIPTS,没有 = SCRIPT_MAX_SCRIPTS_NO_PSRAM)
+  uint8_t capacity() const { return _capacity; }
+  // 再存一个叫 name 的流程会不会超出容量(同名覆盖不算新增)
+  bool fullFor(const char *name) const { return find(name) == nullptr && _count >= _capacity; }
 
   const Script *at(uint8_t index) const;
   const Script *find(const char *name) const;
@@ -225,7 +235,10 @@ public:
   static bool validate(const char *name, const char *text, char *errBuf, size_t errLen);
 
 private:
-  Script  _scripts[SCRIPT_MAX_SCRIPTS];
+  // 脚本表在 begin() 里分配:优先 PSRAM。
+  // ⚠️ 以前是静态数组,16 × 4.9KB ≈ 78KB 常驻内部 RAM(内部 RAM 一共才 ~230KB)
+  Script *_scripts = nullptr;
+  uint8_t _capacity = 0;
   uint8_t _count = 0;
   bool    _mounted = false;
   volatile bool _stopRequested = false;
