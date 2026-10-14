@@ -108,18 +108,15 @@ router.post('/api/v1/app/flows', needApp, async (req, res) => {
       });
     }
 
-    // ⚠️⚠️ ver 必须是 **owner 范围内单调递增** 的,不能"每条从 1 开始"。
+    // ⚠️⚠️ ver 必须**单调递增**,不能"每条从 1 开始"。
     //
     //    踩过的坑:原来 INSERT 写死 ver=1,于是两条流程的 ver 都是 1,
     //    MAX(ver)=1 永远不变 ⇒ App 的增量拉取(ver > since)**永远拉不到东西**,
     //    只有首次全量能用。表现就是"服务器新加的流程,App 重启也不下来"。
     //
-    //    这里用"先查 MAX 再 +1"。极端并发下两个请求可能拿到同一个号
-    //    (概率极低,而且本项目只有一两个人用),真要严谨应该用
-    //    `UPDATE counters SET n=LAST_INSERT_ID(n+1)` 那种做法。
-    const [mx] = await db.q(
-      'SELECT COALESCE(MAX(ver),0) AS v FROM flows WHERE owner = ?', [owner]);
-    const nextVer = Number(mx ? mx.v : 0) + 1;
+    //    后来改成"先查 MAX 再 +1",并发保存会拿到同一个号;
+    //    现在从全局计数器原子取号(见 db.nextSeq / 迁移 002)。
+    const nextVer = await db.nextSeq('flow_ver');
 
     if (cur) {
       await db.run(
@@ -155,9 +152,7 @@ router.delete('/api/v1/app/flows/:name', needApp, async (req, res) => {
     // ⚠️ 软删除而不是 DELETE —— 别的设备要能拉到"这条被删了"这个事实,
     //    硬删的话增量同步永远不知道它曾经存在。
     // 同上的道理:删除也要拿一个**新的、更大的** ver,否则别的设备增量拉不到
-    const [mx2] = await db.q(
-      'SELECT COALESCE(MAX(ver),0) AS v FROM flows WHERE owner = ?', [owner]);
-    const delVer = Number(mx2 ? mx2.v : 0) + 1;
+    const delVer = await db.nextSeq('flow_ver');
     await db.run(
       `INSERT INTO flows (owner, name, ver, deleted) VALUES (?,?,?,1)
        ON DUPLICATE KEY UPDATE deleted = 1, ver = ?`, [owner, name, delVer, delVer]);
@@ -184,8 +179,7 @@ router.post('/api/admin/flows/status', needLogin, needAdminRole, async (req, res
   if (!owner || !name) return json(res, 400, { ok: false, message: '缺少 owner 或 name' });
   if (!status) return json(res, 400, { ok: false, message: 'status 只能是 enabled/disabled/deleted' });
 
-  const [mx] = await db.q('SELECT COALESCE(MAX(ver),0) AS v FROM flows WHERE owner = ?', [owner]);
-  const nextVer = Number(mx ? mx.v : 0) + 1;
+  const nextVer = await db.nextSeq('flow_ver');
   await db.run(
     'UPDATE flows SET status = ?, deleted = ?, ver = ? WHERE owner = ? AND name = ?',
     [status, status === 'deleted' ? 1 : 0, nextVer, owner, name]);

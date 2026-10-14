@@ -51,6 +51,19 @@ async function run(sql, params) {
 }
 
 /**
+ * 从 counters 表原子取下一个号(并发请求不会拿到同一个号)。
+ *
+ * LAST_INSERT_ID(expr) 把新值记在**当前连接**上,并随这条 UPDATE 的结果包返回(insertId),
+ * 所以加一和取值是同一条语句完成的 —— 连接池里换连接也不会串号。
+ * 行被 UPDATE 锁住,另一个请求要等这条提交后才能 +1。
+ */
+async function nextSeq(name) {
+  const r = await run('UPDATE counters SET n = LAST_INSERT_ID(n + 1) WHERE name = ?', [name]);
+  if (!r.affectedRows) throw new Error(`计数器 ${name} 不存在(迁移 002 没执行?)`);
+  return Number(r.insertId);
+}
+
+/**
  * 建库 + 建表(幂等)。
  * 先按 DB_NAME 建库并切过去,再把 sql/schema.sql 跑一遍 —— CREATE TABLE IF NOT EXISTS 是安全的。
  * 老库缺的列由 src/migrate.js 补(boot 里紧接着调用)。
@@ -91,4 +104,4 @@ async function close() {
   if (pool) { await pool.end(); pool = null; }
 }
 
-module.exports = { getPool, q, one, run, initSchema, getSetting, setSetting, close, DB };
+module.exports = { getPool, q, one, run, nextSeq, initSchema, getSetting, setSetting, close, DB };

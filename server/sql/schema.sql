@@ -198,6 +198,13 @@ CREATE TABLE IF NOT EXISTS flows (
   KEY idx_owner_ver (owner, ver)
 ) ENGINE=InnoDB COMMENT='流程主表(服务器为权威)';
 
+-- 全局递增计数器:flows.ver 从这里取号(迁移 002 建表 + 种子)
+CREATE TABLE IF NOT EXISTS counters (
+  name VARCHAR(32) NOT NULL COMMENT '计数器名(flow_ver = 流程版本号)',
+  n    BIGINT      NOT NULL DEFAULT 0 COMMENT '当前值;取号用 UPDATE ... SET n = LAST_INSERT_ID(n + 1)',
+  PRIMARY KEY (name)
+) ENGINE=InnoDB COMMENT='全局递增计数器(并发安全取号)';
+
 -- 板子上有哪些流程(心跳时上报名字)
 CREATE TABLE IF NOT EXISTS board_flows (
   mac   VARCHAR(32) NOT NULL,

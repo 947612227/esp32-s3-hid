@@ -6,8 +6,10 @@
 #  完全不碰正式库,验证三种场景:
 #    A. 全新部署:空实例 → 启动服务(schema.sql + 迁移)
 #    B. 老库升级:先按旧版 schema.sql 建库 → 启动新服务 → 迁移补列
-#    C. 正式库结构:把正式库的表结构(只读导出)灌进来 → 启动新服务 → 迁移应全部跳过
-#  每种场景都:① 和正式库的结构逐列对比 ② 调一遍真实接口(心跳/事件/连接方式/流程同步)
+#    C. 正式库结构:把正式库的表结构(只读导出)灌进来 → 启动新服务 → 只执行本分支新增的迁移
+#  对照基准 = 「正式库结构 + 本分支迁移」(C 的结果,所以 C 先跑):
+#    C 只允许**新增** EXPECTED_NEW_TABLES 里的表,已有表的列/索引一项都不能动;
+#    A、B 和这个基准逐列对比;三种场景都调一遍真实接口(心跳/事件/连接方式/流程同步)
 #
 #  用法(仓库根目录):
 #    bash tests/server/test_schema_deploy.sh [旧版本 git 引用,默认 d4b105c]
@@ -26,6 +28,7 @@ T_USER=tp_test                              # 临时实例里的测试账号
 T_PASS=tp_test_pw_$$
 FAILS=0                                     # 失败项计数
 SRV_PID=
+EXPECTED_NEW_TABLES="counters"              # 本分支迁移在正式库上**新建**的表(其余一律不许变)
 
 log()  { echo "[$(date +%H:%M:%S)] $*"; }
 fail() { echo "  ❌ $*"; FAILS=$((FAILS + 1)); }
@@ -145,12 +148,36 @@ call_apis() {   # $1 = 库名
 
 compare_schema() {   # $1 = 库名
   dump_schema "$1" "$TMP/$1.txt" || return
-  if diff "$TMP/ref.txt" "$TMP/$1.txt" > "$TMP/$1.diff"; then
-    pass "表结构与正式库一致"
+  if diff "$TMP/ref_after.txt" "$TMP/$1.txt" > "$TMP/$1.diff"; then
+    pass "表结构与「正式库 + 迁移」一致"
   else
-    fail "表结构与正式库不一致(< 正式库  > 本库):"; head -30 "$TMP/$1.diff"
+    fail "表结构与「正式库 + 迁移」不一致(< 基准  > 本库):"; head -30 "$TMP/$1.diff"
   fi
 }
+
+# ---------------------------------------------------------------- C. 正式库结构(先跑:它的结果是 A/B 的对照基准)
+log "C. 正式库结构 + 本分支迁移(只允许新增 $EXPECTED_NEW_TABLES,已有表不许变)"
+tmysql -e "CREATE DATABASE tp_prodcopy CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+tmysql tp_prodcopy < "$TMP/prod.sql" || fail "正式库结构导入失败"
+if start_server tp_prodcopy; then
+  grep -E "\[迁移\]|加列" "$TMP/server_tp_prodcopy.log" | sed 's/^/  /'
+  if grep -q "加列" "$TMP/server_tp_prodcopy.log"; then fail "正式库结构上居然加了列"; else pass "没有给已有表加列"; fi
+  dump_schema tp_prodcopy "$TMP/ref_after.txt" || exit 1
+  diff "$TMP/ref.txt" "$TMP/ref_after.txt" > "$TMP/c.diff"
+  CHANGED=$(grep -c '^<' "$TMP/c.diff")                                     # 被改/被删的(必须 0)
+  NEW_TABLES=$(grep -E '^> (列|索引)' "$TMP/c.diff" | awk '{print $3}' | cut -d. -f1 | sort -u | tr '\n' ' ' | sed 's/ $//')
+  if [ "$CHANGED" -eq 0 ] && [ "$NEW_TABLES" = "$EXPECTED_NEW_TABLES" ]; then
+    pass "迁移只新增了表「$NEW_TABLES」($(grep -c '^>' "$TMP/c.diff") 项),已有表一项没动"
+  else
+    fail "迁移对正式库结构的改动不符合预期(改动 $CHANGED 项,新表「$NEW_TABLES」):"; head -20 "$TMP/c.diff"
+  fi
+  call_apis tp_prodcopy; stop_server
+  # 再启动一次:迁移已记录,应提示"已是最新"
+  if start_server tp_prodcopy; then
+    if grep -q "已是最新" "$TMP/server_tp_prodcopy.log"; then pass "重启后迁移不重复执行"; else fail "重启后迁移又执行了"; fi
+    stop_server
+  fi
+else fail "C 服务启动失败"; exit 1; fi
 
 # ---------------------------------------------------------------- A. 全新部署
 log "A. 全新部署(库还不存在,由服务启动时自己建)"
@@ -173,21 +200,6 @@ if start_server touchpad; then
   grep -E "\[迁移\]|加列" "$TMP/server_touchpad.log" | sed 's/^/  /'
   compare_schema touchpad; call_apis touchpad; stop_server
 else fail "B 服务启动失败"; fi
-
-# ---------------------------------------------------------------- C. 正式库结构
-log "C. 正式库结构(迁移应全部跳过,不改任何列)"
-tmysql -e "CREATE DATABASE tp_prodcopy CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
-tmysql tp_prodcopy < "$TMP/prod.sql" || fail "正式库结构导入失败"
-if start_server tp_prodcopy; then
-  grep -E "\[迁移\]|加列" "$TMP/server_tp_prodcopy.log" | sed 's/^/  /'
-  if grep -q "加列" "$TMP/server_tp_prodcopy.log"; then fail "正式库结构上居然加了列"; else pass "没有加任何列"; fi
-  compare_schema tp_prodcopy; call_apis tp_prodcopy; stop_server
-  # 再启动一次:迁移已记录,应提示"已是最新"
-  if start_server tp_prodcopy; then
-    if grep -q "已是最新" "$TMP/server_tp_prodcopy.log"; then pass "重启后迁移不重复执行"; else fail "重启后迁移又执行了"; fi
-    stop_server
-  fi
-else fail "C 服务启动失败"; fi
 
 echo
 if [ $FAILS -eq 0 ]; then echo "===== 全部通过 ====="; else echo "===== 失败 $FAILS 项 ====="; fi
