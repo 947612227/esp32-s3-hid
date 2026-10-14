@@ -242,6 +242,71 @@ app.get('/api/v1/board/health', (req, res) => json(res, 200, { ok: true, ts: Dat
  *   pubIp  公网 IP(板子自报时是 req 源地址;App 代报时留空,不覆盖)
  *   doGeo  要不要做地理定位(只有知道真实公网 IP 时才做)
  */
+/**
+ * 把板子上报的流程列表同步进 board_flows(只动有变化的行)。
+ *
+ * ⚠️ 以前是"整表删光再插回",每次心跳都要 DELETE + 20 次 INSERT + 一次 history 清理。
+ *    更糟的是:上报**只带名字不带内容**时(App 代报允许这样),
+ *    旧内容会被 NULL 覆盖 —— 服务器留底就没了。
+ *
+ * 规则:
+ *   - 列表里没有的名字 → 删
+ *   - 新名字           → 插(有内容就带上)
+ *   - 已有名字 + 带了内容且不同 → 旧内容进 flow_history,再更新
+ *   - 已有名字 + 没带内容       → 不动(保留旧内容)
+ *
+ * @param {string}   mac    板子 MAC(小写)
+ * @param {string[]} names  流程名列表
+ * @param {object}   texts  名字 → 内容(可缺)
+ * @returns {{added:number, changed:number, removed:number}}
+ */
+async function syncBoardFlows(mac, names, texts) {
+  const tx = (texts && typeof texts === 'object') ? texts : {};
+  const wanted = [];                         // 去重、截断后的新名字列表
+  for (const n of names.slice(0, 30)) {
+    const nm = String(n || '').slice(0, 64);
+    if (nm && !wanted.includes(nm)) wanted.push(nm);
+  }
+  const oldRows = await db.q('SELECT name, text FROM board_flows WHERE mac = ?', [mac]);
+  const oldMap = new Map(oldRows.map(r => [r.name, r.text]));
+  const st = { added: 0, changed: 0, removed: 0 };
+
+  for (const nm of oldMap.keys()) {
+    if (!wanted.includes(nm)) {
+      await db.run('DELETE FROM board_flows WHERE mac = ? AND name = ?', [mac, nm]);
+      st.removed++;
+    }
+  }
+  let historyAdded = false;
+  for (const nm of wanted) {
+    const newText = (typeof tx[nm] === 'string') ? tx[nm] : null;
+    if (!oldMap.has(nm)) {
+      await db.run('INSERT INTO board_flows (mac, name, text) VALUES (?,?,?)', [mac, nm, newText]);
+      st.added++;
+      continue;
+    }
+    const oldText = oldMap.get(nm);
+    if (newText === null || newText === oldText) continue;
+    // 只在**旧内容非空**时存历史 —— 否则会存一堆 NULL
+    if (oldText) {
+      await db.run('INSERT INTO flow_history (mac, name, text) VALUES (?,?,?)', [mac, nm, oldText]);
+      historyAdded = true;
+    }
+    await db.run('UPDATE board_flows SET text = ? WHERE mac = ? AND name = ?', [newText, mac, nm]);
+    st.changed++;
+  }
+  if (historyAdded) {
+    // 只留最近 10 版
+    await db.run(
+      `DELETE FROM flow_history WHERE mac = ? AND id NOT IN (
+         SELECT id FROM (
+           SELECT id FROM flow_history WHERE mac = ?
+           ORDER BY saved_at DESC LIMIT 10
+         ) t)`, [mac, mac]);
+  }
+  return st;
+}
+
 async function applyBoardReport(b, mac, pubIp, doGeo) {
 
   const old = await db.one('SELECT * FROM boards WHERE mac = ?', [mac]);
@@ -285,34 +350,12 @@ async function applyBoardReport(b, mac, pubIp, doGeo) {
   }).catch(e => console.warn('[geo] 写库失败', e.message));
   }
 
-  // 流程名字 + 内容:整表替换(简单可靠)
+  // 流程名字 + 内容:按差异更新(没带 flowNames = 板子说这次没变,整段跳过)
   if (Array.isArray(b.flowNames)) {
-  const texts = (b.flowTexts && typeof b.flowTexts === 'object') ? b.flowTexts : {};
-  const oldRows = await db.q('SELECT name, text FROM board_flows WHERE mac = ?', [mac]);
-  const oldMap = {};
-  for (const r of oldRows) oldMap[r.name] = r.text;
-
-  await db.run('DELETE FROM board_flows WHERE mac = ?', [mac]);
-  for (const n of b.flowNames.slice(0, 30)) {
-    const nm = String(n || '').slice(0, 64);
-    if (!nm) continue;
-    const tx = (typeof texts[nm] === 'string') ? texts[nm] : null;
-    await db.run('INSERT INTO board_flows (mac, name, text) VALUES (?,?,?)',
-      [mac, nm, tx]);
-    // 内容变了 → 存一份历史(误删/改错都能翻回来)
-    // 只在**旧内容非空**且确实变了的时候存历史 —— 否则会存一堆 NULL
-    if (tx && oldMap[nm] && oldMap[nm] !== tx) {
-      await db.run('INSERT INTO flow_history (mac, name, text) VALUES (?,?,?)',
-        [mac, nm, oldMap[nm]]);
+    const st = await syncBoardFlows(mac, b.flowNames, b.flowTexts);
+    if (st.added || st.changed || st.removed) {
+      console.log(`[flows] ${mac} 流程备份:新增 ${st.added} / 修改 ${st.changed} / 删除 ${st.removed}`);
     }
-  }
-  // 只留最近 10 版
-  await db.run(
-    `DELETE FROM flow_history WHERE mac = ? AND id NOT IN (
-       SELECT id FROM (
-         SELECT id FROM flow_history WHERE mac = ?
-         ORDER BY saved_at DESC LIMIT 10
-       ) t)`, [mac, mac]);
   }
 
   if (b.ip && (!old || old.ip !== b.ip)) {
@@ -340,6 +383,14 @@ app.post('/api/v1/board/heartbeat', needBoard, async (req, res) => {
     const pubIp = clientIp(req).replace(/^::ffff:/, '');
     const fw = await applyBoardReport(b, mac, pubIp, true);
 
+    // 板子这次没带流程列表(它认为没变),但服务器这边一条都没有
+    // (库是新的 / 板子被从看板删过)⇒ 让板子下次心跳带上全量
+    let needFlows = false;
+    if (!Array.isArray(b.flowNames) && (b.flows || 0) > 0) {
+      const c = await db.one('SELECT COUNT(*) AS n FROM board_flows WHERE mac = ?', [mac]);
+      needFlows = !c || Number(c.n) === 0;
+    }
+
     // ⚠️ **这是唯一的"服务器 → 板子"下行通道**。
     //    板子在内网、服务端够不到它,只能"板子来问、顺路捎命令回去"。
     //    等板子下次心跳(2 分钟)才把 LED 命令带下去。取完立刻删,避免重复执行。
@@ -357,6 +408,7 @@ app.post('/api/v1/board/heartbeat', needBoard, async (req, res) => {
       serverTime: Date.now(),
       firmware: fw || { hasUpdate: false },
       led,
+      needFlows,
     });
   } catch (e) {
     console.error('心跳失败:', e);

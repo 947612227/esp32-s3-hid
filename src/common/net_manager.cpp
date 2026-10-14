@@ -1345,6 +1345,22 @@ static bool jsonPick(const String &j, const char *key, char *out, size_t n) {
   return true;
 }
 
+// 心跳里的流程列表:上次服务端确认收到的内容摘要
+static bool     s_hbFlowsSynced = false;   // 开机后还没成功报过 ⇒ 必须带
+static uint32_t s_hbFlowsHash = 0;         // 上次成功上报的 flowNames+flowTexts 摘要
+static uint32_t s_hbFlowsAt = 0;           // 上次带全量的时刻
+static const uint32_t HB_FLOWS_REFRESH_MS = 30UL * 60 * 1000;  // 没变也每 30 分钟带一次全量兜底
+
+/** FNV-1a 32 位摘要(只用来判断"变没变") */
+static uint32_t fnv1a(const String &s) {
+  uint32_t h = 2166136261u;
+  for (size_t i = 0; i < s.length(); i++) {
+    h ^= (uint8_t)s[i];
+    h *= 16777619u;
+  }
+  return h;
+}
+
 static void hbSend() {
   if (WiFi.status() != WL_CONNECTED) return;
 
@@ -1360,29 +1376,37 @@ static void hbSend() {
   body += "\"flows\":" + String(Scripts.count()) + ",";
 
   // 流程**名字**列表(服务端看板要显示,不能只有数量)
-  body += "\"flowNames\":[";
+  String flowsPart = "\"flowNames\":[";
   for (uint8_t i = 0; i < Scripts.count() && i < 20; i++) {
     const Script *sc = Scripts.at(i);
     if (!sc) continue;
-    if (i) body += ",";
+    if (i) flowsPart += ",";
     String nm; hbJsonEscape(nm, String(sc->name));
-    body += "\"" + nm + "\"";
+    flowsPart += "\"" + nm + "\"";
   }
-  body += "],";
+  flowsPart += "],";
 
   // 流程**内容**也一起上报 —— 服务端留底,万一被误删可以恢复。
   // (实测踩过:自动化点击误触「删除」,流程就没了)
-  body += "\"flowTexts\":{";
+  flowsPart += "\"flowTexts\":{";
   for (uint8_t i = 0; i < Scripts.count() && i < 20; i++) {
     const Script *sc = Scripts.at(i);
     if (!sc) continue;
-    if (i) body += ",";
+    if (i) flowsPart += ",";
     String nm, tx;
     hbJsonEscape(nm, String(sc->name));
     hbJsonEscape(tx, scriptToText(*sc));
-    body += "\"" + nm + "\":\"" + tx + "\"";
+    flowsPart += "\"" + nm + "\":\"" + tx + "\"";
   }
-  body += "},";
+  flowsPart += "},";
+
+  // 流程没变就不带(省流量 + 服务端不用逐行比对)。
+  // ⚠️ 要么名字+内容一起带,要么都不带:旧服务端见到 flowNames 但没 flowTexts
+  //    会把留底的内容全写成 NULL;都不带它就整段跳过。
+  const uint32_t flowsHash = fnv1a(flowsPart);
+  const bool sendFlows = !s_hbFlowsSynced || flowsHash != s_hbFlowsHash ||
+                         millis() - s_hbFlowsAt >= HB_FLOWS_REFRESH_MS;
+  if (sendFlows) body += flowsPart;
 
   // 当前跑的流程 + 下一次定时(App/服务端都关心)
   if (s_state.running && s_state.lastName[0]) {
@@ -1420,6 +1444,16 @@ static void hbSend() {
   if (code == 200) {
     String resp = http.getString();
     s_hbEverOk = true;
+    if (sendFlows) {
+      s_hbFlowsSynced = true;
+      s_hbFlowsHash = flowsHash;
+      s_hbFlowsAt = millis();
+    }
+    // 服务端那边没有这块板子的流程(新库 / 被删过)⇒ 下次带全量
+    if (resp.indexOf("\"needFlows\":true") >= 0) {
+      s_hbFlowsSynced = false;
+      LOGF("%s 服务端要求补报流程列表", TAG);
+    }
     bool has = (resp.indexOf("\"hasUpdate\":true") >= 0);
     if (has) {
       char buf[128] = {0};
@@ -1436,7 +1470,8 @@ static void hbSend() {
     } else {
       s_fwHasUpdate = false;
     }
-    LOGF("%s 心跳成功(固件更新:%s)", TAG, s_fwHasUpdate ? "有" : "无");
+    LOGF("%s 心跳成功(固件更新:%s,%u 字节,%s)", TAG, s_fwHasUpdate ? "有" : "无",
+         (unsigned)body.length(), sendFlows ? "含流程列表" : "流程未变未带");
 
     // ---- 下行命令:LED ----
     // ⚠️ 服务端够不到内网的板子,这是**唯一**的下行通道:
