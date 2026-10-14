@@ -1051,6 +1051,12 @@ ScriptResult ScriptEngine::run(uint8_t index, StepHook hook,
     setErr(res.error, sizeof(res.error), "没有第 %u 个脚本", (unsigned)index);
     return res;
   }
+  // 运行标志:任何 return 路径都会自动复位
+  struct RunningFlag {
+    volatile bool &f;
+    explicit RunningFlag(volatile bool &x) : f(x) { f = true; }
+    ~RunningFlag() { f = false; }
+  } runningFlag(_running);
 
   LOGF("%s 执行 [%u] %s (%u 步)", TAG, (unsigned)index, sc->name,
        (unsigned)sc->stepCount);

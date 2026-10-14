@@ -194,6 +194,9 @@ public:
   void requestStop() { _stopRequested = true; }
   bool stopRequested() const { return _stopRequested; }
 
+  // 是否有流程正在执行(不管从串口/HTTP/BLE/定时哪个入口进来)
+  bool running() const { return _running; }
+
   // 把文本写入 /scripts/<name>.txt 并重新载入;errBuf 返回失败原因
   bool saveFromText(const char *name, const char *text, char *errBuf,
                     size_t errLen);
@@ -226,6 +229,7 @@ private:
   uint8_t _count = 0;
   bool    _mounted = false;
   volatile bool _stopRequested = false;
+  volatile bool _running = false;   // run() 执行期间为 true
 };
 
 extern ScriptEngine Scripts;

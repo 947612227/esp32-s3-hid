@@ -1545,11 +1545,32 @@ void NetManager::loop() {
   heartbeatTick();
 }
 
+// 流程执行中心跳最多推迟这么久。
+// 服务端 5 分钟没心跳就判离线(ONLINE_MS),心跳每 2 分钟一次 ⇒ 最多再推 150 秒还来得及。
+static const uint32_t HB_DEFER_MAX_MS = 150000UL;
+static uint32_t s_hbDeferSince = 0;      // 开始推迟的时刻(0 = 没在推迟)
+
 static void heartbeatTick() {
   if (WiFi.status() != WL_CONNECTED) return;
   // 上电 8 秒后第一次(等网络稳),之后每 HEARTBEAT_MS 一次
   if (!s_hbLastAt) { s_hbLastAt = millis(); s_hbPending = true; }
   if (s_hbPending && (millis() - s_hbLastAt) > (s_hbEverOk ? 1000UL : 8000UL)) {
+    // ⚠️ 流程执行中不发:hbSend 是同步 HTTP,最长要阻塞约 10 秒(连接 4s + 读 6s),
+    //    而这里会被流程的等待钩子调到 ⇒ 流程里的 wait 被拉长、点击时机全乱。
+    //    推迟到流程结束后再发(主循环下一轮就会发);流程特别长时最多推迟 HB_DEFER_MAX_MS。
+    if (Scripts.running()) {
+      if (s_hbDeferSince == 0) {
+        s_hbDeferSince = millis();
+        LOGF("%s 心跳推迟:流程执行中", TAG);
+      }
+      if (millis() - s_hbDeferSince < HB_DEFER_MAX_MS) return;
+      LOGF("%s 流程已执行超过 %lu 秒,心跳不再推迟", TAG,
+           (unsigned long)(HB_DEFER_MAX_MS / 1000));
+    } else if (s_hbDeferSince) {
+      LOGF("%s 流程已结束,补发推迟的心跳(推迟了 %lu ms)", TAG,
+           (unsigned long)(millis() - s_hbDeferSince));
+    }
+    s_hbDeferSince = 0;
     s_hbPending = false;
     s_hbLastAt = millis();
     hbSend();
