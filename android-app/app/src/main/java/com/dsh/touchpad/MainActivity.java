@@ -92,6 +92,24 @@ public class MainActivity extends Activity {
     private int tab = TAB_STATUS;
     private JSONArray scripts = new JSONArray();
     private String lastScriptsSig = "";
+    /**
+     * 流程列表的缓存是否有效。
+     *
+     * ⚠️ 为什么要缓存(用户实测反馈):
+     *      流程列表存在**板子**上,App 每次都要走蓝牙去 /api/scripts 读一遍。
+     *      蓝牙一次往返 2~3 秒 ⇒ 每次切到「流程」页都要等 5 秒、一直显示"读取中…"。
+     *      而流程列表**几乎不变** ⇒ 没必要时时去读。
+     *
+     *      现在:第一次进去读一次,以后切来切去都用缓存(秒开);
+     *            只有**点「刷新列表」**、或**存/删流程之后**才重新拉。
+     */
+    private boolean scriptsLoaded = false;
+
+    /**
+     * 流程列表"脏了" —— 别处(编辑页保存 / 复制 / 删除)改过流程。
+     * 用静态量是因为编辑页是**另一个 Activity**,拿不到这个实例。
+     */
+    public static volatile boolean scriptsDirty = false;
     private boolean autoRefresh = true;
 
     // 执行中:禁用所有按钮,避免"手点"和"注入"互相干扰
@@ -916,16 +934,21 @@ public class MainActivity extends Activity {
         }, new View.OnClickListener() {
             @Override public void onClick(View v) {
                 if ("new".equals(v.getTag())) newFlow();
-                else loadScripts();
+                else refreshScripts();      // 「刷新列表」= 强制重新请求
             }
         }));
         content.addView(head);
 
         scriptListBox = card(null);
-        scriptListBox.addView(hint("读取中…"));
         content.addView(scriptListBox);
-        lastScriptsSig = "";
-        loadScripts();
+        if (scriptsLoaded && scripts.length() > 0) {
+            // 有缓存 ⇒ 直接画,不闪"读取中…",也不用等蓝牙
+            renderScripts();
+        } else {
+            scriptListBox.addView(hint("读取中…"));
+            lastScriptsSig = "";
+            loadScripts();
+        }
     }
 
     /** 目标 App 卡片:图标 + 名字;没选就提示去选 */
@@ -990,8 +1013,33 @@ public class MainActivity extends Activity {
         }
     }
 
+    /**
+     * 显示流程列表。
+     *
+     * **有缓存就直接画,不发请求** —— 切页签秒开 ✅
+     * 想强制拿最新的,用 {@link #refreshScripts()} ✅
+     */
     private void loadScripts() {
-        // 同上:UI 没建好就别发请求了(回来了也没地方画)
+        // UI 没建好就别画了
+        if (scriptListBox == null) return;
+        if (scriptsDirty) { scriptsLoaded = false; scriptsDirty = false; }
+        if (scriptsLoaded) { renderScripts(); return; }
+        fetchScripts();
+    }
+
+    /** 强制重新从板子拉流程列表(「刷新列表」按钮用) */
+    private void refreshScripts() {
+        if (scriptListBox == null) return;
+        scriptsLoaded = false;
+        scriptsDirty = false;
+        lastScriptsSig = "";            // 清掉签名,保证重绘一定发生
+        scriptListBox.removeAllViews();
+        scriptListBox.addView(hint("读取中…"));
+        fetchScripts();
+    }
+
+    /** 真正发请求读流程列表 */
+    private void fetchScripts() {
         if (scriptListBox == null) return;
         board.scripts(new Board.Cb() {
             @Override public void done(boolean ok, String body) {
@@ -1011,6 +1059,7 @@ public class MainActivity extends Activity {
                 }
                 // 只在数据真的变了才重绘,避免按钮位置跳动
                 // (重绘瞬间按下会把点击套到另一个按钮上,实测踩过)
+                scriptsLoaded = true;        // 缓存有效了
                 String sig = body.length() + ":" + body.hashCode();
                 if (!sig.equals(lastScriptsSig)) {
                     lastScriptsSig = sig;
@@ -1357,6 +1406,7 @@ public class MainActivity extends Activity {
                         cp.intervalTimes = src.intervalTimes;
                         cp.resetRunState();
                         flows.put(cp);
+                        scriptsDirty = true;
                         toast("已复制为「" + newName + "」(暂停状态)");
                         loadScripts();
                     }

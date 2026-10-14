@@ -808,6 +808,9 @@ public class FlowEditActivity extends Activity {
                     //    真冲突时服务器**保留它自己的版本**,下一次 pull 会把
                     //    服务器的内容拉回来 —— 不会静默丢数据。
                     FlowSync.push(FlowEditActivity.this, n, content, draft, 0, null);
+                    // ⚠️ 让流程列表的缓存作废 —— 否则回到主界面还显示旧列表
+                    //    (用户刚存的流程看不到,得手动点「刷新列表」)
+                    MainActivity.scriptsDirty = true;
                     finish();
                 }
             }
