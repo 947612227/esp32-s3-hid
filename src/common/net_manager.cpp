@@ -10,6 +10,7 @@
 #include <WiFiUdp.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
+#include <mbedtls/sha256.h>
 
 #include "hid_report_map.h"
 #include "hid_touch.h"
@@ -595,15 +596,126 @@ static void handleOtaUpload() {
   }
 }
 
+static void hbJsonEscape(String &out, const String &in);   // 定义在心跳那一节
+
+/** 32 字节摘要 → 64 位小写十六进制 */
+static void shaHex(const uint8_t *d, char *out) {
+  static const char *H = "0123456789abcdef";
+  for (int i = 0; i < 32; i++) { out[i * 2] = H[d[i] >> 4]; out[i * 2 + 1] = H[d[i] & 15]; }
+  out[64] = 0;
+}
+
+/** 流程在跑 / 排着队 / 频率循环开着 ⇒ 不能升级(升级要重启,会打断) */
+static bool otaBusyReason(String &why) {
+  if (Scripts.running() || s_state.running) { why = "流程执行中"; return true; }
+  if (s_hasRequest) { why = "有流程排队待执行"; return true; }
+  if (s_schedActive) { why = "频率循环开着"; return true; }
+  return false;
+}
+
 /**
- * 从**控制中心**下载固件并升级。
+ * 从控制中心下载固件写进备用分区,**核对大小和 sha256 都对上**才切换启动分区。
  *
- * 流程:App 点「开始升级」→ 调这个接口 → 板子自己去服务器拉 .bin,
- *      边下边写进备用分区 → 校验 → 重启。
+ * 边下边写、边算 sha256(固件 1.2MB,RAM 只有 ~160KB 空闲,不能整包放内存)。
+ * 校验不对就 Update.abort():备用分区作废,启动分区不变,板子继续跑旧固件。
  *
- * 为什么让板子自己下而不是 App 转存:
- *   板子直连服务器带宽更好;而且 Update.writeStream() 是流式的,
- *   不占内存(固件 1.2MB,RAM 只有 ~160KB 空闲)。
+ * @param url     下载地址(服务端给的,带 X-Token 请求)
+ * @param wantSha 期望的 sha256(64 位十六进制);空 = 老数据没有,只核对大小
+ * @param wantSize 期望字节数;0 = 不核对
+ * @param err     失败原因(给 App / 服务端看)
+ * @return true = 已写入并切好启动分区(调用方负责回复后重启)
+ */
+static bool otaDownloadAndFlash(const char *url, const char *wantSha, uint32_t wantSize, String &err) {
+  WiFiClient client;
+  HTTPClient http;
+  http.setConnectTimeout(8000);
+  http.setTimeout(20000);
+  // 跟着重定向走(服务器可能 301/307)
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  if (!http.begin(client, String(url))) { err = "连不上控制中心"; return false; }
+  http.addHeader("X-Token", SERVER_TOKEN);
+  int code = http.GET();
+  if (code != 200) {
+    http.end();
+    err = String("下载失败 HTTP ") + code;
+    LOGF("%s %s", TAG, err.c_str());
+    return false;
+  }
+
+  int len = http.getSize();
+  if (wantSize && len > 0 && (uint32_t)len != wantSize) {
+    http.end();
+    err = String("文件大小不对:服务器说 ") + wantSize + ",实际 " + len;
+    LOGF("%s %s", TAG, err.c_str());
+    return false;
+  }
+  if (!Update.begin(len > 0 ? (size_t)len : UPDATE_SIZE_UNKNOWN)) {
+    http.end();
+    err = String("准备写入失败:") + Update.errorString();
+    LOGF("%s %s", TAG, err.c_str());
+    return false;
+  }
+
+  mbedtls_sha256_context sha;
+  mbedtls_sha256_init(&sha);
+  mbedtls_sha256_starts_ret(&sha, 0);
+  static uint8_t buf[4096];
+  WiFiClient *st = http.getStreamPtr();
+  size_t got = 0;
+  uint32_t lastData = millis();
+  while (http.connected() && (len <= 0 || got < (size_t)len)) {
+    size_t n = st->available();
+    if (!n) {
+      if (millis() - lastData > 20000) break;      // 20 秒没数据 ⇒ 当断了
+      delay(2);
+      continue;
+    }
+    n = st->readBytes(buf, n > sizeof(buf) ? sizeof(buf) : n);
+    if (!n) continue;
+    lastData = millis();
+    mbedtls_sha256_update_ret(&sha, buf, n);
+    if (Update.write(buf, n) != n) {
+      err = String("写入失败:") + Update.errorString();
+      break;
+    }
+    got += n;
+  }
+  http.end();
+  uint8_t dig[32];
+  mbedtls_sha256_finish_ret(&sha, dig);
+  mbedtls_sha256_free(&sha);
+  char hex[65];
+  shaHex(dig, hex);
+
+  if (!err.length() && len > 0 && got != (size_t)len) {
+    err = String("下载不完整:") + got + " / " + len + " 字节";
+  }
+  if (!err.length() && wantSize && got != wantSize) {
+    err = String("文件大小不对:应为 ") + wantSize + ",收到 " + got;
+  }
+  if (!err.length() && wantSha && wantSha[0] && strcasecmp(hex, wantSha) != 0) {
+    err = String("sha256 不对,固件可能损坏(收到 ") + String(hex).substring(0, 12) + "…)";
+  }
+  if (err.length()) {
+    Update.abort();
+    LOGF("%s 升级放弃:%s(旧固件不受影响)", TAG, err.c_str());
+    return false;
+  }
+  if (!Update.end(true)) {
+    err = String("校验镜像失败:") + Update.errorString();
+    LOGF("%s %s", TAG, err.c_str());
+    return false;
+  }
+  LOGF("%s 固件写入完成:%u 字节,sha256 %s", TAG, (unsigned)got,
+       (wantSha && wantSha[0]) ? "已核对" : "(服务器没给,未核对)");
+  return true;
+}
+
+/**
+ * 从**控制中心**下载固件并升级(App 点「开始升级」调这个)。
+ *
+ * 板子自己去服务器拉 .bin(带宽好、不占 App),写完重启。
+ * 地址 / sha256 来自上一次心跳里服务端说的「有新固件」。
  */
 static void handleOtaFromServer() {
   if (!s_fwHasUpdate || s_fwUrl[0] == 0) {
@@ -611,50 +723,19 @@ static void handleOtaFromServer() {
                   "{\"ok\":false,\"message\":\"没有待升级的固件\"}");
     return;
   }
+  String why;
+  if (otaBusyReason(why)) {
+    s_server.send(409, "application/json",
+                  "{\"ok\":false,\"message\":\"" + why + ",现在不能升级\"}");
+    return;
+  }
   LOGF("%s 开始从控制中心下载固件:%s", TAG, s_fwVersion);
-
-  WiFiClient client;
-  HTTPClient http;
-  http.setConnectTimeout(8000);
-  http.setTimeout(20000);
-  // 跟着重定向走(服务器可能 301/307)
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  if (!http.begin(client, String(s_fwUrl))) {
-    s_server.send(500, "application/json",
-                  "{\"ok\":false,\"message\":\"连不上控制中心\"}");
+  String err;
+  if (!otaDownloadAndFlash(s_fwUrl, s_fwSha, s_fwSize, err)) {
+    String e; hbJsonEscape(e, err);
+    s_server.send(500, "application/json", "{\"ok\":false,\"message\":\"" + e + "\"}");
     return;
   }
-  http.addHeader("X-Token", SERVER_TOKEN);
-  int code = http.GET();
-  if (code != 200) {
-    LOGF("%s 下载失败:HTTP %d", TAG, code);
-    http.end();
-    s_server.send(500, "application/json",
-                  String("{\"ok\":false,\"message\":\"下载失败 HTTP ") + code + "\"}");
-    return;
-  }
-
-  int len = http.getSize();
-  if (len <= 0) len = UPDATE_SIZE_UNKNOWN;
-  if (!Update.begin(len)) {
-    LOGF("%s Update.begin 失败: %s", TAG, Update.errorString());
-    http.end();
-    s_server.send(500, "application/json",
-                  String("{\"ok\":false,\"message\":\"") + Update.errorString() + "\"}");
-    return;
-  }
-
-  size_t written = Update.writeStream(http.getStream());
-  http.end();
-
-  if (written == 0 || !Update.end(true)) {
-    LOGF("%s 写入失败: %s", TAG, Update.errorString());
-    s_server.send(500, "application/json",
-                  String("{\"ok\":false,\"message\":\"") + Update.errorString() + "\"}");
-    return;
-  }
-
-  LOGF("%s 固件写入完成:%u 字节,准备重启", TAG, (unsigned)written);
   s_server.send(200, "application/json",
                 "{\"ok\":true,\"message\":\"固件已写入,正在重启...\"}");
   delay(800);
@@ -1359,6 +1440,27 @@ static bool jsonPick(const String &j, const char *key, char *out, size_t n) {
   return true;
 }
 
+// ---- 后台远程升级 ----
+// 服务端在心跳回复里带 "ota":{...} ⇒ 记下来,主循环空闲时执行(见 otaTick)
+struct OtaCmd {
+  bool     pending;
+  char     ver[24];
+  char     url[160];
+  char     sha[72];
+  uint32_t size;
+};
+static OtaCmd s_otaCmd = {};
+// 上一次远程升级没做成的原因,下次心跳报给服务端(报成功后清空)
+static char s_otaRepState[12] = {0};   // deferred = 推迟(忙) / failed = 失败
+static char s_otaRepVer[24]   = {0};
+static char s_otaRepMsg[128]  = {0};
+
+static void otaReport(const char *state, const char *ver, const String &msg) {
+  strncpy(s_otaRepState, state, sizeof(s_otaRepState) - 1);
+  strncpy(s_otaRepVer, ver, sizeof(s_otaRepVer) - 1);
+  strncpy(s_otaRepMsg, msg.c_str(), sizeof(s_otaRepMsg) - 1);
+}
+
 // 心跳里的流程列表:上次服务端确认收到的内容摘要
 static bool     s_hbFlowsSynced = false;   // 开机后还没成功报过 ⇒ 必须带
 static uint32_t s_hbFlowsHash = 0;         // 上次成功上报的 flowNames+flowTexts 摘要
@@ -1384,6 +1486,13 @@ static void hbSend() {
   body += "\"fw\":\"" + String(FW_VERSION) + "\",";
   body += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
   body += "\"channel\":\"stable\",";
+  // 告诉服务端:这版固件认得心跳回复里的远程升级命令(老固件没有这个字段)
+  body += "\"caps\":\"ota-remote\",";
+  if (s_otaRepState[0]) {
+    String m; hbJsonEscape(m, String(s_otaRepMsg));
+    body += "\"otaReport\":{\"state\":\"" + String(s_otaRepState) + "\",\"ver\":\""
+          + String(s_otaRepVer) + "\",\"msg\":\"" + m + "\"},";
+  }
   body += "\"heap\":" + String(ESP.getFreeHeap()) + ",";
   body += "\"uptime\":" + String(millis() / 1000) + ",";
   body += "\"hid\":" + String(Touch.ready() ? "true" : "false") + ",";
@@ -1485,6 +1594,26 @@ static void hbSend() {
     }
     LOGF("%s 心跳成功(固件更新:%s,%u 字节,%s)", TAG, s_fwHasUpdate ? "有" : "无",
          (unsigned)body.length(), sendFlows ? "含流程列表" : "流程未变未带");
+    s_otaRepState[0] = 0;   // 推迟/失败原因已经报上去了
+
+    // ---- 下行命令:后台远程升级 ----
+    // ⚠️ 只在 "ota":{...} 这一段里取字段 —— 回复里 firmware 段也有 version/url/sha256
+    int oi = resp.indexOf("\"ota\":{");
+    if (oi >= 0) {
+      int oe = resp.indexOf('}', oi);
+      String o = resp.substring(oi, oe > oi ? oe + 1 : resp.length());
+      OtaCmd c = {};
+      bool ok = jsonPick(o, "version", c.ver, sizeof(c.ver)) &&
+                jsonPick(o, "url", c.url, sizeof(c.url));
+      jsonPick(o, "sha256", c.sha, sizeof(c.sha));
+      int p = o.indexOf("\"size\":");
+      if (p >= 0) c.size = (uint32_t)o.substring(p + 7).toInt();
+      if (ok && strcmp(c.ver, FW_VERSION) != 0) {
+        c.pending = true;
+        s_otaCmd = c;
+        LOGF("%s 收到后台远程升级命令:%s → %s(%u 字节)", TAG, FW_VERSION, c.ver, (unsigned)c.size);
+      }
+    }
 
     // ---- 下行命令:LED ----
     // ⚠️ 服务端够不到内网的板子,这是**唯一**的下行通道:
@@ -1580,6 +1709,32 @@ static void discoverLoop() {
 /** 心跳调度的对外入口(由 loop 调) */
 static void heartbeatTick();
 
+/**
+ * 执行后台下发的远程升级(心跳回复里收到的)。
+ *
+ * ⚠️ loop 也会在流程的等待钩子里被调到 —— 所以先看忙不忙:
+ *    流程在跑 / 排队 / 频率循环开着 ⇒ 这次不升,报「推迟」,服务端下次心跳再发。
+ */
+static void otaTick() {
+  if (!s_otaCmd.pending) return;
+  s_otaCmd.pending = false;
+  String why;
+  if (otaBusyReason(why)) {
+    LOGF("%s 远程升级推迟:%s", TAG, why.c_str());
+    otaReport("deferred", s_otaCmd.ver, why);
+    return;
+  }
+  LOGF("%s 开始远程升级:%s → %s", TAG, FW_VERSION, s_otaCmd.ver);
+  String err;
+  if (otaDownloadAndFlash(s_otaCmd.url, s_otaCmd.sha, s_otaCmd.size, err)) {
+    LOGF("%s 远程升级写入成功,重启进 %s", TAG, s_otaCmd.ver);
+    delay(500);
+    ESP.restart();
+  }
+  otaReport("failed", s_otaCmd.ver, err);
+  hbSchedule();   // 失败原因尽快报上去
+}
+
 void NetManager::loop() {
   if (_started) s_server.handleClient();
   // ⚠️ **热点模式也要开发现服务**。
@@ -1591,6 +1746,7 @@ void NetManager::loop() {
     discoverLoop();
   }
   heartbeatTick();
+  otaTick();
 }
 
 // 流程执行中心跳最多推迟这么久。

@@ -121,6 +121,37 @@ mkdir -p "$(dirname "$OUT")"
   echo "   镜像头 OK,包含版本号 $VERSION_NAME"
 
   cp "$bin" "$OUT"
+
+  # 5. 整片刷机(后台「USB 刷机」)还要另外三段:启动程序 / 分区表 / boot_app0
+  #    地址和参数与 `pio run -e ble -t upload -v` 打出来的 esptool 命令一致
+  #    (2026-10-15 实测:--flash_mode dio --flash_freq 80m --flash_size 8MB
+  #     0x0 bootloader.bin 0x8000 partitions.bin 0xe000 boot_app0.bin 0x10000 firmware.bin)
+  步骤 "5. 收集整片刷机用的文件"
+  local parts=$(dirname "$OUT")/parts
+  local app0=$PLATFORMIO_CORE_DIR/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin
+  local fsize
+  fsize=$(sed -n -E 's/^board_build\.flash_size *= *([0-9]+MB).*/\1/p' "$ini" | head -1)
+  [ -n "$fsize" ] || 失败 "platformio.ini 里没有 board_build.flash_size"
+  mkdir -p "$parts"
+  for f in .pio/build/ble/bootloader.bin .pio/build/ble/partitions.bin "$app0"; do
+    [ -f "$f" ] || 失败 "缺少 $f"
+    cp "$f" "$parts/"
+  done
+  cat > "$parts/flash.json" <<JSON
+{
+  "chip": "esp32s3",
+  "flashMode": "dio",
+  "flashFreq": "80m",
+  "flashSize": "$fsize",
+  "files": [
+    { "name": "bootloader", "file": "bootloader.bin", "address": 0 },
+    { "name": "partitions", "file": "partitions.bin", "address": 32768 },
+    { "name": "boot_app0",  "file": "boot_app0.bin",  "address": 57344 },
+    { "name": "app",        "file": "app",            "address": 65536 }
+  ]
+}
+JSON
+  echo "   $(ls "$parts" | tr '\n' ' ')(Flash $fsize)"
 }
 
 case "$KIND" in

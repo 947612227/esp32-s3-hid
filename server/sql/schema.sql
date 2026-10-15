@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS boards (
   link_hid      VARCHAR(64)  DEFAULT NULL COMMENT 'HID 输入设备名',
   link_by       VARCHAR(64)  DEFAULT NULL COMMENT '哪个手机报的',
   link_at       DATETIME     DEFAULT NULL COMMENT '连接方式最后上报时间',
+  caps          VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '固件能力(ota-remote = 支持后台远程升级)',
   INDEX (last_seen)
 ) ENGINE=InnoDB;
 
@@ -170,6 +171,23 @@ CREATE TABLE IF NOT EXISTS policies (
   target VARCHAR(32) NULL,
   at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
+
+-- 后台远程升级(迁移 004 建表;两处定义保持一致)
+CREATE TABLE IF NOT EXISTS board_ota (
+  mac          VARCHAR(32)  NOT NULL,
+  auto         TINYINT(1)   NOT NULL DEFAULT 0  COMMENT '1 = 有新固件时空闲自动升级',
+  want_fw_id   BIGINT       NULL     COMMENT '后台手动下发的目标固件 firmware.id(执行完 / 取消后清空)',
+  want_at      DATETIME     NULL     COMMENT '手动下发时间(24 小时没执行掉就作废)',
+  want_by      INT          NULL     COMMENT '谁下发的(users.id)',
+  origin       VARCHAR(8)   NOT NULL DEFAULT '' COMMENT 'manual = 手动 / auto = 自动',
+  from_fw      VARCHAR(32)  NOT NULL DEFAULT '' COMMENT '升级前的版本',
+  to_fw        VARCHAR(32)  NOT NULL DEFAULT '' COMMENT '目标版本',
+  state        VARCHAR(16)  NOT NULL DEFAULT '' COMMENT 'pending / sent / deferred / success / failed / cancelled',
+  state_msg    VARCHAR(255) NOT NULL DEFAULT '' COMMENT '状态说明(推迟原因 / 失败原因)',
+  state_at     DATETIME     NULL     COMMENT '状态最后变化时间',
+  last_fail_fw VARCHAR(32)  NOT NULL DEFAULT '' COMMENT '自动升级失败过的版本(不再自动重试,重开自动升级才清)',
+  PRIMARY KEY (mac)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='板子远程升级';
 
 -- ---------------------------------------------------------------- 审计
 CREATE TABLE IF NOT EXISTS audit_log (

@@ -61,6 +61,7 @@
     { k: 'apps',     i: '📦', n: 'APP 管理' },
     { k: 'firmware', i: '💾', n: '固件管理' },
     { k: 'build',    i: '🛠', n: '一键构建' },
+    { k: 'usb',      i: '🔌', n: 'USB 刷机' },
     { k: 'logs',     i: '📋', n: '日志系统' },
     { k: 'stats',    i: '📊', n: '数据统计' },
   ];
@@ -123,6 +124,19 @@
       });
       const logDlg  = reactive({ show: false, id: 0, text: '', offset: 0, status: '', follow: true });
       let logTimer = null;
+
+      // 远程升级:控制中心勾选的板子、选固件的弹窗
+      const sel     = reactive({});               // mac → true(勾选)
+      const otaDlg  = reactive({ show: false, macs: [], fwId: '', result: [] });
+
+      // USB 刷机页:浏览器能力 + 选的固件 / 模式 + 进度日志
+      const usb = reactive({
+        secure: !!window.isSecureContext,
+        hasSerial: !!navigator.serial,
+        origin: location.origin,
+        src: '', mode: 'keep', running: false,
+        pct: 0, stage: '', log: '', result: '',
+      });
 
       /** 打开灯对话框(模板里直接改 ledDlg 也行,但集中一处更清楚) */
       function openLed(mac) { ledDlg.mac = mac; ledDlg.show = true; }
@@ -303,7 +317,8 @@
       async function publishBuild(b) {
         const what = b.kind === 'app'
           ? `App ${b.versionName}(versionCode ${b.versionCode})\n\n发布后手机打开 App 时会提示更新。`
-          : `固件 ${b.versionName} 到 ${b.channel} 渠道\n\n发布后这个渠道的板子会收到更新提示(在 App 里确认后才升级)。`;
+          : `固件 ${b.versionName} 到 ${b.channel} 渠道\n\n发布后:这个渠道的板子在 App 里会提示更新;`
+            + `开了「自动升级」的板子会在空闲时自己升级。`;
         if (!confirm('发布 ' + what + '\n旧版本按保留策略只留最近 5 个。')) return;
         await api('/api/admin/builds/' + b.id + '/publish', { method: 'POST' })
           .catch(e => { alert('发布失败:' + e.message); throw e; });
@@ -359,6 +374,8 @@
         if (p === 'apps')     jobs.push(loadApk());
         if (p === 'firmware') jobs.push(loadFw());
         if (p === 'build')    jobs.push(loadBuildMeta(), loadBuilds());
+        // 刷机进行中别刷新列表(下拉框选项变了会让人误会)
+        if (p === 'usb' && !usb.running) jobs.push(loadFw(), loadBuilds());
         if (p === 'flows')    jobs.push(loadFlows());
         if (p === 'logs')     jobs.push(loadAudit());
         if (p === 'stats')    jobs.push(loadStats(), loadEvents());
@@ -521,6 +538,113 @@
         await loadUsers();
       }
 
+      // ---------------------------------------------------------------- 远程升级
+
+      const selMacs = computed(() => boards.value.filter(b => sel[b.mac]).map(b => b.mac));
+      function selAll(on) { for (const b of boards.value) sel[b.mac] = !!on; }
+
+      /** 升级状态的颜色:成功绿 / 失败红 / 进行中黄 */
+      function otaClass(o) {
+        if (!o || !o.state) return '';
+        return { success: 'ok', failed: 'err', cancelled: '' }[o.state] ?? 'warn';
+      }
+
+      /** 打开「升级固件」弹窗(macs:一块或多块) */
+      async function openOta(macs) {
+        if (!macs.length) return alert('先勾选板子');
+        await loadFw();
+        Object.assign(otaDlg, { show: true, macs: macs.slice(), fwId: fws.value.length ? fws.value[0].id : '', result: [] });
+      }
+      async function sendOta() {
+        if (!otaDlg.fwId) return alert('先选固件版本');
+        const f = fws.value.find(x => x.id === otaDlg.fwId);
+        if (!confirm(`给 ${otaDlg.macs.length} 块板子升级到 ${f ? f.version : otaDlg.fwId}?\n\n`
+          + `板子下次心跳(最多 2 分钟)收到命令;正在跑流程或 15 分钟内有定时任务时会推迟,空闲了再升。\n`
+          + `板子下载完会核对 sha256,不一致不刷。`)) return;
+        const d = await api('/api/admin/ota', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ macs: otaDlg.macs, fwId: otaDlg.fwId }),
+        }).catch(e => { alert('下发失败:' + e.message); throw e; });
+        otaDlg.result = d.results || [];
+        await loadBoards();
+      }
+      async function cancelOta(mac) {
+        if (!confirm('取消 ' + mac + ' 的升级?')) return;
+        const d = await api('/api/admin/ota/cancel', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mac }),
+        });
+        alert(d.message);
+        await loadBoards();
+      }
+      async function setOtaAuto(macs, on) {
+        if (!macs.length) return alert('先勾选板子');
+        if (on && !confirm(`给 ${macs.length} 块板子打开自动升级?\n\n`
+          + `以后这个渠道发布新固件(或升级策略指定了版本),板子空闲时会自己升级。`)) return;
+        await api('/api/admin/ota/auto', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ macs, auto: on }),
+        }).catch(e => { alert('设置失败:' + e.message); throw e; });
+        await loadBoards();
+      }
+
+      // ---------------------------------------------------------------- USB 刷机
+
+      /** 可整片刷的来源:已发布固件(带刷机文件的)+ 构建成功还没发布的固件 */
+      const usbSources = computed(() => {
+        const out = [];
+        for (const f of fws.value) {
+          if (f.usbFlash) out.push({ src: 'fw-' + f.id, label: `${f.version}(${f.channel},已发布 ${fmtTime(f.createdAt)})` });
+        }
+        for (const b of builds.value) {
+          if (b.kind === 'firmware' && b.status === 'success' && b.usbFlash) {
+            out.push({ src: 'build-' + b.id, label: `${b.versionName}(构建 #${b.id},未发布)` });
+          }
+        }
+        return out;
+      });
+
+      function usbLog(s) {
+        usb.log += s + '\n';
+        Vue.nextTick(() => { const el = document.getElementById('usbLog'); if (el) el.scrollTop = el.scrollHeight; });
+      }
+
+      async function usbFlash() {
+        if (!usb.src) return alert('先选要刷的固件');
+        const erase = usb.mode === 'erase';
+        if (erase && !confirm('「全新板子」会先整片擦除:板子上的 WiFi 配置、流程、定时任务全部清空。\n确定?')) return;
+        // ⚠️ requestPort 必须紧跟着点击调用(浏览器要求用户手势),所以放在任何 await 网络请求之前
+        let port;
+        try {
+          port = await navigator.serial.requestPort();
+        } catch (e) {
+          return usbLog('没有选串口:' + e.message);
+        }
+        Object.assign(usb, { running: true, pct: 0, stage: '', log: '', result: '' });
+        try {
+          usbLog('加载刷机工具…');
+          const esptool = await import('/admin/static/vendor/esptool-js/bundle.js');
+          const uf = await import('/admin/static/usbflash.js');
+          usbLog('下载固件文件…');
+          const plan = await uf.fetchFlashPlan(usb.src, u => fetch(u, { credentials: 'same-origin' }));
+          usbLog(`固件 ${plan.label}:` + plan.files.map(f => `${f.name}@0x${f.address.toString(16)} ${size(f.data.length)}`).join(' / '));
+          const r = await uf.flashBoard({
+            esptool, port, plan, eraseAll: erase, log: usbLog,
+            onProgress: (done, total, name) => {
+              usb.pct = total ? Math.floor(done * 100 / total) : 0;
+              usb.stage = name;
+            },
+          });
+          usb.result = `✅ 刷好了:${plan.version}` + (r.mac ? `(MAC ${r.mac})` : '')
+            + (erase ? '。新板子需要用 App 配 WiFi 后才会出现在控制中心。' : '。板子重启后会照常连 WiFi 来心跳。');
+          usbLog(usb.result);
+        } catch (e) {
+          usb.result = '❌ 失败:' + (e && e.message || e);
+          usbLog(usb.result);
+        } finally {
+          usb.running = false;
+        }
+      }
+
       // ---------------------------------------------------------------- 分页
 
       function pgGo(key, p) {
@@ -557,7 +681,9 @@
         events, audit, pg, apkForm, fwForm, newUser, dlg, flowDlg, polDlg, ledDlg, busy,
         flows, flowOwners, flowFilter,
         bmeta, builds, bform, logDlg,
+        sel, selMacs, otaDlg, usb, usbSources,
         // 方法
+        selAll, otaClass, openOta, sendOta, cancelOta, setOtaAuto, usbFlash,
         go, loadAll, loadPage, loadBoards, loadPhones, loadApk, loadFw,
         loadUsers, loadStats, loadEvents, loadAudit, loadSummary, loadFlows,
         setFlowStatus, flowStatus, flowStatusText, flowStatusClass,

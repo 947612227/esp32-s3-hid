@@ -93,6 +93,10 @@
   .pager .cur{color:var(--fg);font-weight:600}
   .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
   .row label{color:var(--dim);font-size:12px;min-width:78px}
+  .st-ok{color:var(--ok)} .st-err{color:var(--err)} .st-warn{color:var(--warn)}
+  .ota-cell{max-width:200px}
+  .bar{height:10px;background:#010409;border:1px solid var(--line);border-radius:5px;overflow:hidden}
+  .bar i{display:block;height:100%;background:var(--acc);transition:width .2s}
 
   /* 弹窗 */
   .mask{position:fixed;inset:0;background:rgba(0,0,0,.62);display:flex;
@@ -214,13 +218,23 @@
         <div v-if="!boards.length" class="muted">
           还没有板子接入。板子固件里配好服务器地址后,上电就会来心跳。
         </div>
-        <table v-else>
+        <div v-if="boards.length" class="row" id="otaBar">
+          <span class="muted">已勾选 {{ selMacs.length }} 块:</span>
+          <button :disabled="!selMacs.length" @click="openOta(selMacs)">⬆ 升级固件</button>
+          <button :disabled="!selMacs.length" @click="setOtaAuto(selMacs, true)">🔁 开自动升级</button>
+          <button :disabled="!selMacs.length" @click="setOtaAuto(selMacs, false)">⏸ 关自动升级</button>
+          <span class="tag">远程升级要板子固件 ≥ 1.4.0;更老的先在 App 里点一次「升级板子固件」或用「USB 刷机」</span>
+        </div>
+        <table v-if="boards.length">
           <thead><tr>
-            <th>状态</th><th>名字 / MAC</th><th>WiFi</th><th>固件</th>
+            <th><input type="checkbox" title="全选" :checked="selMacs.length===boards.length"
+                       @change="selAll($event.target.checked)"></th>
+            <th>状态</th><th>名字 / MAC</th><th>WiFi</th><th>固件</th><th>固件升级</th>
             <th>流程队列</th><th>内存</th><th>最后心跳</th><th>连接方式</th><th>操作</th>
           </tr></thead>
           <tbody>
             <tr v-for="b in boards" :key="b.mac">
+              <td><input type="checkbox" v-model="sel[b.mac]"></td>
               <td><span class="pill" :class="b.online?'on':'off'">{{ b.online?'在线':'离线' }}</span></td>
               <td><b>{{ b.name || '(未命名)' }}</b><br><span class="tag">{{ b.mac }}</span></td>
               <td>{{ (b.wifi && b.wifi.ssid) || '—' }}
@@ -232,6 +246,19 @@
                 </template>
               </td>
               <td>{{ b.fw || '—' }}<br><span class="tag">{{ b.channel || 'stable' }} · {{ b.ip || '' }}</span></td>
+              <td class="ota-cell">
+                <span v-if="!b.remoteOta" class="tag">固件太老,不支持远程</span>
+                <span v-else-if="b.ota.auto" class="tag" style="color:var(--ok)">🔁 自动升级 开</span>
+                <span v-else class="tag">自动升级 关</span>
+                <template v-if="b.ota.state">
+                  <br><b :class="'st-'+otaClass(b.ota)">{{ b.ota.stateText }}</b>
+                  <span v-if="b.ota.toFw" class="tag"> → {{ b.ota.toFw }}</span>
+                  <br><span class="tag">{{ b.ota.msg }} · {{ ago(b.ota.at) }}</span>
+                  <template v-if="['pending','deferred','sent'].includes(b.ota.state)">
+                    <br><a href="javascript:;" @click="cancelOta(b.mac)">取消</a>
+                  </template>
+                </template>
+              </td>
               <td>
                 <span v-if="b.running" style="color:var(--warn)">▶ 正在跑:{{ b.running }}</span>
                 <br v-if="b.running">
@@ -265,6 +292,7 @@
                 <button @click="showFlows(b.mac)">流程</button>
                 <button @click="setPolicy(b.mac)">策略</button>
                 <button @click="openLed(b.mac)">💡 灯</button>
+                <button @click="openOta([b.mac])">⬆ 升级</button>
               </td>
             </tr>
           </tbody>
@@ -440,12 +468,66 @@
               <td><b>{{ f.version }}</b></td>
               <td>{{ f.channel }}</td>
               <td>{{ size(f.size) }}</td>
-              <td>{{ f.notes || '—' }}</td>
+              <td>{{ f.notes || '—' }}
+                <br><span class="tag">{{ f.usbFlash ? '🔌 可 USB 整片刷' : '只能 OTA(手工上传的没有启动程序/分区表)' }}</span></td>
               <td>{{ fmtTime(f.createdAt) }}</td>
               <td><button @click="delFw(f.id)">删除</button></td>
             </tr>
           </tbody>
         </table>
+      </section>
+
+      <!-- ==================== 🔌 USB 刷机 ==================== -->
+      <section v-show="page==='usb'">
+        <h2>🔌 USB 刷机 <span class="muted">板子用 USB 线插在<b>这台电脑</b>上,浏览器直接刷</span></h2>
+
+        <div class="box" v-if="!usb.hasSerial" style="border-color:var(--warn);margin-bottom:14px">
+          <b style="color:var(--warn)">⚠️ 这个浏览器现在不能访问串口。</b>
+          <template v-if="!usb.secure">
+            原因:后台是 http 地址,浏览器只在 https 或特别放行的地址上开放 Web Serial。<br>
+            用 <b>Chrome</b> 或 <b>Edge</b>(Safari / 火狐不支持),一次性设置:<br>
+            ① 地址栏打开 <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code>
+               (Edge 是 <code>edge://flags/#unsafely-treat-insecure-origin-as-secure</code>)<br>
+            ② 在输入框里填 <code>{{ usb.origin }}</code>,右边选 <b>Enabled</b><br>
+            ③ 点右下角「重启浏览器」,回到这页就能用了
+          </template>
+          <template v-else>请换 <b>Chrome</b> 或 <b>Edge</b> 打开(Safari / 火狐不支持 Web Serial)。</template>
+        </div>
+
+        <div class="row"><label>固件</label>
+          <select v-model="usb.src" :disabled="usb.running" style="min-width:320px">
+            <option value="">— 选要刷的版本 —</option>
+            <option v-for="s in usbSources" :key="s.src" :value="s.src">{{ s.label }}</option>
+          </select>
+          <span v-if="!usbSources.length" class="tag">还没有可整片刷的固件:用「一键构建」编一次固件就有</span>
+        </div>
+        <div class="row"><label>模式</label>
+          <label style="min-width:0;color:var(--fg)"><input type="radio" value="keep" v-model="usb.mode" :disabled="usb.running">
+            保留数据(老板子:WiFi、流程、定时都留着)</label>
+          <label style="min-width:0;color:var(--fg)"><input type="radio" value="erase" v-model="usb.mode" :disabled="usb.running">
+            全新板子(先整片擦除)</label>
+        </div>
+        <div class="row">
+          <button :disabled="!usb.hasSerial || usb.running || !usb.src" @click="usbFlash()">
+            {{ usb.running ? '刷机中…' : '🔌 选择串口并开始刷' }}</button>
+          <span class="tag">点了会弹出串口列表,选 USB 串口(CH343 / USB Single Serial / usbmodem…)</span>
+        </div>
+        <div v-if="usb.running || usb.pct" class="row" style="max-width:640px">
+          <div class="bar" style="flex:1"><i :style="{width: usb.pct + '%'}"></i></div>
+          <span class="tag">{{ usb.pct }}% {{ usb.stage }}</span>
+        </div>
+        <div v-if="usb.result" class="row"><b :class="usb.result.startsWith('✅') ? 'st-ok' : 'st-err'">{{ usb.result }}</b></div>
+        <pre v-if="usb.log" id="usbLog" style="background:#010409;border:1px solid var(--line);border-radius:6px;
+             padding:10px;max-height:40vh;overflow:auto;font-size:12px;line-height:1.5;
+             white-space:pre-wrap;word-break:break-all">{{ usb.log }}</pre>
+
+        <div class="box" style="margin-top:14px">
+          <b>说明</b><br>
+          · 写入 4 段:0x0 启动程序 / 0x8000 分区表 / 0xe000 boot_app0 / 0x10000 固件;每段写完让芯片算 MD5 核对<br>
+          · <b>保留数据</b>:不碰 0x9000 的配置区,WiFi、流程、定时都还在 —— 老固件板子一次升到支持远程升级的版本就用这个<br>
+          · <b>全新板子</b>:先整片擦除再写;刷完用 App 配 WiFi,板子来心跳后就出现在控制中心<br>
+          · 连不上时:按住板子 <b>BOOT</b> 键,点一下 <b>RST</b>,松开 BOOT,再点开始
+        </div>
       </section>
 
       <!-- ==================== 🛠 一键构建 ==================== -->
@@ -710,6 +792,33 @@
       <div class="row" style="margin-top:12px">
         <button @click="savePolicy()">保存</button>
         <button @click="polDlg.show=false">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 远程升级固件 ==================== -->
+  <div class="mask" v-if="otaDlg.show" @click.self="otaDlg.show=false">
+    <div class="modal" style="max-width:520px">
+      <h3>⬆ 远程升级固件 · {{ otaDlg.macs.length }} 块板子</h3>
+      <div class="tag" style="margin-bottom:8px">{{ otaDlg.macs.join('、') }}</div>
+      <div class="muted" style="margin-bottom:10px">
+        · 命令跟着板子下次心跳下去(最多 2 分钟)<br>
+        · 板子<b>正在跑流程</b>、或 <b>15 分钟内有定时任务</b>时推迟,空闲了再升<br>
+        · 板子下载完核对大小和 sha256,不一致就不刷,原固件照常跑<br>
+        · 固件低于 1.4.0 的板子收不到命令,会直接标失败
+      </div>
+      <div class="row"><label>升级到</label>
+        <select v-model="otaDlg.fwId" style="min-width:260px">
+          <option v-for="f in fws" :key="f.id" :value="f.id">{{ f.version }}({{ f.channel }},{{ fmtTime(f.createdAt) }})</option>
+        </select></div>
+      <table v-if="otaDlg.result.length" style="margin-top:8px">
+        <tbody><tr v-for="r in otaDlg.result" :key="r.mac">
+          <td class="tag">{{ r.mac }}</td><td :class="r.ok ? 'st-ok' : 'st-err'">{{ r.message }}</td>
+        </tr></tbody>
+      </table>
+      <div class="row" style="margin-top:12px">
+        <button v-if="!otaDlg.result.length" :disabled="!fws.length" @click="sendOta()">下发升级</button>
+        <button @click="otaDlg.show=false">{{ otaDlg.result.length ? '关闭' : '取消' }}</button>
       </div>
     </div>
   </div>

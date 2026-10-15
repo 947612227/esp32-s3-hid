@@ -388,7 +388,8 @@ async function publish(id, userId, ip) {
     const opt = { src: file, move: false, notes: b.notes, userId, ip, auditDetail: `构建 #${id}` };
     const r = b.kind === 'app'
       ? await releases.addApk(Object.assign(opt, { versionCode: b.version_code, versionName: b.version_name }))
-      : await releases.addFirmware(Object.assign(opt, { version: b.version_name, channel: b.channel }));
+      : await releases.addFirmware(Object.assign(opt, { version: b.version_name, channel: b.channel,
+                                                        partsSrc: path.join(buildDir(id), 'parts') }));
     await db.run(
       "UPDATE builds SET status = 'published', published_id = ?, published_at = NOW() WHERE id = ?",
       [r.id, id]);
@@ -412,6 +413,9 @@ function toDto(b) {
     peakMemKb: b.peak_mem_kb, publishedId: b.published_id, createdBy: b.created_by,
     username: b.username || '',
     createdAt: ms(b.created_at), finishedAt: ms(b.finished_at), publishedAt: ms(b.published_at),
+    // 固件构建带了整片刷机文件 ⇒ 没发布也能先在「USB 刷机」里刷一块板子试
+    usbFlash: b.kind === 'firmware' && !!b.artifact
+      && fs.existsSync(path.join(buildDir(b.id), 'parts', 'flash.json')),
   };
 }
 

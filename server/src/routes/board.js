@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const db = require('../db');
+const ota = require('../ota');
 const { encrypt } = require('../crypto');
 const { FW_DIR, HEARTBEAT_KEEP_DAYS, json, clientIp, needBoard } = require('../common');
 
@@ -85,7 +86,9 @@ async function firmwareForBoard(mac, boardFw, channel) {
       return null;
     }
   }
-  return latest.version === boardFw ? null : latest;
+  // ⚠️ 只给**更新**的版本:板子刷了更高的测试版时,渠道里的"最新"其实更旧,
+  //    以前只比"不相等"⇒ 会提示 / 自动升级成旧版(指定版本例外,那是管理员明确要的)
+  return ota.cmpVer(latest.version, boardFw) > 0 ? latest : null;
 }
 
 // ================================================================ 板子接口
@@ -247,6 +250,13 @@ router.post('/api/v1/board/heartbeat', needBoard, async (req, res) => {
     if (!mac) return json(res, 400, { ok: false, message: '缺少 mac' });
     const pubIp = clientIp(req).replace(/^::ffff:/, '');
     const fw = await applyBoardReport(b, mac, pubIp, true);
+    // 固件能力只认板子自己的心跳(App 代报的状态里没有这个字段,不能拿空值覆盖)
+    if (typeof b.caps === 'string') {
+      await db.run('UPDATE boards SET caps = ? WHERE mac = ? AND caps <> ?',
+        [b.caps.slice(0, 64), mac, b.caps.slice(0, 64)]);
+    }
+    // 后台远程升级:这次要不要带升级命令(忙 / 快到定时任务 / 老固件 ⇒ 不带)
+    const otaFw = await ota.decide(b, mac, fw);
 
     // 板子这次没带流程列表(它认为没变),但服务器这边一条都没有
     // (库是新的 / 板子被从看板删过),或者有留底内容是 NULL
@@ -270,13 +280,22 @@ router.post('/api/v1/board/heartbeat', needBoard, async (req, res) => {
       }
     } catch (e) { /* 没有命令就算了 */ }
 
-    json(res, 200, {
+    const host = req.headers.host;
+    // ⚠️ 以前这里直接回了数据库原始行(没有 hasUpdate / url),
+    //    板子永远认为"没有新固件",App 里的「升级板子固件」从来不会出现
+    // ⚠️ ota 必须排在 firmware 后面:板子解析 firmware 段用的是"全文第一个 version / url"
+    const out = {
       ok: true,
       serverTime: Date.now(),
-      firmware: fw || { hasUpdate: false },
+      firmware: fw ? ota.fwDto(fw, host) : { hasUpdate: false },
       led,
       needFlows,
-    });
+    };
+    if (otaFw) {
+      const d = ota.fwDto(otaFw, host);
+      out.ota = { id: d.id, version: d.version, url: d.url, sha256: d.sha256, size: d.size };
+    }
+    json(res, 200, out);
   } catch (e) {
     console.error('心跳失败:', e);
     json(res, 500, { ok: false, message: e.message });

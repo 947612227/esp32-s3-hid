@@ -33,6 +33,8 @@ function pickDrops(rows, keyOf, keep) {
 async function dropOne(table, dir, row, action, label, userId, ip) {
   await db.run(`DELETE FROM ${table} WHERE id = ?`, [row.id]);
   try { fs.unlinkSync(path.join(dir, row.file)); } catch (_) { /* 文件早没了也算删掉 */ }
+  // 固件的整片刷机文件(见 releases.partsDir)
+  if (table === 'firmware') fs.rmSync(path.join(dir, row.file + '.parts'), { recursive: true, force: true });
   await audit(userId, action, label, `id=${row.id} file=${row.file}`, ip);
 }
 

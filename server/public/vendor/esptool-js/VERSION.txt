@@ -1,0 +1,2 @@
+esptool-js 0.7.0 (Apache-2.0) https://github.com/espressif/esptool-js
+bundle.js 原样取自 npm 包 esptool-js@0.7.0,未改动。

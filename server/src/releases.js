@@ -12,6 +12,15 @@ const db = require('./db');
 const retention = require('./retention');
 const { FW_DIR, APK_DIR, sha256File, audit } = require('./common');
 
+/** 固件文件对应的整片刷机文件目录(FW_DIR/<固件文件>.parts/) */
+function partsDir(fwFile) { return path.join(FW_DIR, fwFile + '.parts'); }
+
+/** 删固件文件时连同整片刷机文件一起删 */
+function removeFirmwareFiles(fwFile) {
+  try { fs.unlinkSync(path.join(FW_DIR, fwFile)); } catch (_) { /* 早没了也算删掉 */ }
+  fs.rmSync(partsDir(fwFile), { recursive: true, force: true });
+}
+
 /**
  * 放文件:move=true 时直接 rename(上传的临时文件),否则复制(构建产物要留在构建目录里)
  */
@@ -37,6 +46,13 @@ async function addFirmware(o) {
   const dst = path.join(FW_DIR, name);
   placeFile(o.src, dst, o.move);
   const size = fs.statSync(dst).size;
+  // 一键构建的固件带整片刷机文件(启动程序 / 分区表 / boot_app0 / flash.json),跟着固件一起存;
+  // 后台手工上传的只有 .bin,没有这些 ⇒ 只能 OTA,不能 USB 整片刷
+  if (o.partsSrc && fs.existsSync(path.join(o.partsSrc, 'flash.json'))) {
+    const pd = partsDir(name);
+    fs.mkdirSync(pd, { recursive: true });
+    for (const f of fs.readdirSync(o.partsSrc)) fs.copyFileSync(path.join(o.partsSrc, f), path.join(pd, f));
+  }
   const r = await db.run(
     `INSERT INTO firmware (version, channel, file, size, sha256, notes, created_by)
      VALUES (?,?,?,?,?,?,?)`,
@@ -69,4 +85,4 @@ async function addApk(o) {
   return { id: r.insertId, pruned };
 }
 
-module.exports = { addFirmware, addApk };
+module.exports = { addFirmware, addApk, partsDir, removeFirmwareFiles };

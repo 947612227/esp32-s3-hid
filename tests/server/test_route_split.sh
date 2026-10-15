@@ -78,9 +78,14 @@ for side in old new; do
   grep -E '^(路由|中间件) ' "$TMP/routes_$side.raw" > "$TMP/routes_$side.txt"   # 去掉启动时打印的账号密码等
   echo "  · $side: $(grep -c '^路由' "$TMP/routes_$side.txt") 条路由,$(grep -c '^中间件' "$TMP/routes_$side.txt") 个中间件"
 done
-# 拆分之后**有意新增**的路由(后台一键构建 src/routes/build.js)。
-# 规则:旧路由一条不能少、不能变、顺序不能乱;新增的只能是这里登记的
+# 拆分之后**有意新增**的路由(后台远程升级 / USB 刷机文件 在 admin.js;一键构建 src/routes/build.js)。
+# 规则:旧路由一条不能少、不能变、顺序不能乱;新增的只能是这里登记的(按 diff 输出顺序)
 cat > "$TMP/expected_new_routes.txt" <<'EOF'
+路由 POST /api/admin/ota needLogin → needAdminRole → <anonymous>
+路由 POST /api/admin/ota/cancel needLogin → needAdminRole → <anonymous>
+路由 POST /api/admin/ota/auto needLogin → needAdminRole → <anonymous>
+路由 GET /api/admin/flash/:src needLogin → <anonymous>
+路由 GET /api/admin/flash/:src/:name needLogin → <anonymous>
 路由 GET /api/admin/build/meta needLogin → <anonymous>
 路由 GET /api/admin/builds needLogin → <anonymous>
 路由 POST /api/admin/builds needLogin → needAdminRole → <anonymous>
@@ -94,7 +99,7 @@ diff "$TMP/routes_old.txt" "$TMP/routes_new.txt" > "$TMP/routes.diff"
 removed=$(grep -c '^<' "$TMP/routes.diff")
 grep '^>' "$TMP/routes.diff" | sed 's/^> //' > "$TMP/routes_added.txt"
 if [ -s "$TMP/routes_old.txt" ] && [ "$removed" = 0 ] && cmp -s "$TMP/routes_added.txt" "$TMP/expected_new_routes.txt"; then
-  pass "旧路由逐行一致(方法、路径、中间件链、顺序),只多了登记的 $(wc -l < "$TMP/routes_added.txt") 条构建接口"
+  pass "旧路由逐行一致(方法、路径、中间件链、顺序),只多了登记的 $(wc -l < "$TMP/routes_added.txt") 条新接口"
 else
   fail "路由表不一致(少/改了 $removed 条,新增和登记的不符):"; head -40 "$TMP/routes.diff"; cat "$TMP/routes_new.err" | head -20
 fi
@@ -213,6 +218,8 @@ replay new
 EXPECTED_DIFFS="$TMP/expected_diffs.txt"
 cat > "$EXPECTED_DIFFS" <<'EOF'
 ### POST /api/v1/board/heartbeat → 200|{"ok":true,"serverTime":<毫秒>,"firmware":{"hasUpdate":false},"needFlows":false}|{"ok":true,"serverTime":<毫秒>,"firmware":{"hasUpdate":false},"needFlows":true}|优化17:上一条心跳的「乙」只有名字没内容(留底 NULL)⇒ 要求板子补报全量
+### GET /api/admin/boards → 200|{"ok":true,"boards":[{"mac":"aa:bb:cc:dd:ee:11","name":"","fw":"1.0","ip":"","channel":"stable","heap":0,"uptime":<数>,"hid":false,"flows":0,"running":"","flowNames":["乙","甲"],"next":null,"wifi":{"ssid":"","rssi":0,"channel":0,"hasPass":false},"firstSeen":<毫秒>,"lastSeen":<毫秒>,"online":true,"pubIp":"","link":{"mode":"ble","hid":"x","at":<毫秒>},"geo":null}]}|{"ok":true,"boards":[{"mac":"aa:bb:cc:dd:ee:11","name":"","fw":"1.0","ip":"","channel":"stable","heap":0,"uptime":<数>,"hid":false,"flows":0,"running":"","remoteOta":false,"ota":{"auto":false,"state":"","stateText":"","msg":"","at":0},"flowNames":["乙","甲"],"next":null,"wifi":{"ssid":"","rssi":0,"channel":0,"hasPass":false},"firstSeen":<毫秒>,"lastSeen":<毫秒>,"online":true,"pubIp":"","link":{"mode":"ble","hid":"x","at":<毫秒>},"geo":null}]}|远程升级:板子列表多了 remoteOta(固件支不支持)和 ota(升级状态 / 自动升级开关)
+### GET /api/admin/board/aa:bb:cc:dd:ee:11 → 200|{"ok":true,"policy":null,"board":{"mac":"aa:bb:cc:dd:ee:11","name":"","fw":"1.0","ip":"","channel":"stable","heap":0,"uptime":<数>,"hid":0,"flows":0,"running":"","next_name":"","next_at":0,"wifi_ssid":"","wifi_rssi":0,"wifi_channel":0,"wifi_pass_enc":null,"first_seen":"<时间>","last_seen":"<时间>","pub_ip":null,"geo_country":null,"geo_region":null,"geo_city":null,"geo_isp":null,"geo_lat":null,"geo_lon":null,"geo_at":null,"link_mode":"ble","link_hid":"x","link_by":"d1","link_at":"<时间>","online":true,"wifi":{"ssid":"","rssi":0,"channel":0,"pass":""},"ips":[{"ip":"192.168.1.5","at":"<时间>"}],"heartbeats":[{"ts":"<时间>","heap":0,"uptime":<数>,"hid":0,"flows":0,"running":""},{"ts":"<时间>","heap":0,"uptime":<数>,"hid":0,"flows":2,"running":""},{"ts":"<时间>","heap":0,"uptime":<数>,"hid":0,"flows":2,"running":""}]}}|{"ok":true,"policy":null,"ota":{"auto":false,"state":"","stateText":"","msg":"","at":0},"board":{"mac":"aa:bb:cc:dd:ee:11","name":"","fw":"1.0","ip":"","channel":"stable","heap":0,"uptime":<数>,"hid":0,"flows":0,"running":"","next_name":"","next_at":0,"wifi_ssid":"","wifi_rssi":0,"wifi_channel":0,"wifi_pass_enc":null,"first_seen":"<时间>","last_seen":"<时间>","pub_ip":null,"geo_country":null,"geo_region":null,"geo_city":null,"geo_isp":null,"geo_lat":null,"geo_lon":null,"geo_at":null,"link_mode":"ble","link_hid":"x","link_by":"d1","link_at":"<时间>","caps":"","online":true,"remoteOta":false,"wifi":{"ssid":"","rssi":0,"channel":0,"pass":""},"ips":[{"ip":"192.168.1.5","at":"<时间>"}],"heartbeats":[{"ts":"<时间>","heap":0,"uptime":<数>,"hid":0,"flows":0,"running":""},{"ts":"<时间>","heap":0,"uptime":<数>,"hid":0,"flows":2,"running":""},{"ts":"<时间>","heap":0,"uptime":<数>,"hid":0,"flows":2,"running":""}]}}|远程升级:板子详情多了 ota、remoteOta,以及 boards 新列 caps
 EOF
 python3 - "$TMP/replay_old.txt" "$TMP/replay_new.txt" "$EXPECTED_DIFFS" > "$TMP/replay.cmp" <<'PY'
 import sys, io

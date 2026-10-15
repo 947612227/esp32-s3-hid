@@ -7,6 +7,8 @@ const path = require('path');
 const db = require('../db');
 const auth = require('../auth');
 const releases = require('../releases');
+const ota = require('../ota');
+const builder = require('../builder');
 const { decrypt } = require('../crypto');
 const { PUBLIC_DIR, FW_DIR, APK_DIR, BOOT_AT, ONLINE_MS, json, clientIp, parseCookies, isOnline, audit, needLogin, needAdminRole, uploadFw, uploadApk } = require('../common');
 
@@ -89,6 +91,7 @@ router.get('/api/admin/summary', needLogin, async (req, res) => {
 
 router.get('/api/admin/boards', needLogin, async (req, res) => {
   const rows = await db.q('SELECT * FROM boards ORDER BY last_seen DESC');
+  const otaMap = await ota.listDto();
   const out = [];
   for (const b of rows) {
     const flows = await db.q('SELECT name FROM board_flows WHERE mac = ? ORDER BY name', [b.mac]);
@@ -118,6 +121,9 @@ router.get('/api/admin/boards', needLogin, async (req, res) => {
       mac: b.mac, name: b.name, fw: b.fw, ip: b.ip, channel: b.channel,
       heap: b.heap, uptime: b.uptime, hid: !!b.hid, flows: b.flows,
       running: b.running,
+      // 远程升级:固件支不支持 + 当前状态 / 自动升级开关
+      remoteOta: ota.supportsRemote(b.caps),
+      ota: otaMap[b.mac] || ota.toDto(null),
       flowNames: flows.map(f => f.name),
       next: nxt ? { name: nxt.flow_name, at: new Date(nxt.fire_at).getTime(),
                     enabled: !!nxt.enabled }
@@ -263,8 +269,9 @@ router.get('/api/admin/board/:mac', needLogin, async (req, res) => {
   json(res, 200, {
     ok: true,
     policy: pol,
+    ota: ota.toDto(await ota.getRow(mac)),
     board: {
-      ...b, online: isOnline(b.last_seen),
+      ...b, online: isOnline(b.last_seen), remoteOta: ota.supportsRemote(b.caps),
       wifi: { ssid: b.wifi_ssid, rssi: b.wifi_rssi, channel: b.wifi_channel,
               pass: decrypt(b.wifi_pass_enc) },
       ips, heartbeats: hb,
@@ -354,6 +361,8 @@ router.get('/api/admin/firmware', needLogin, async (req, res) => {
       sha256: f.sha256,
       notes: f.notes || '',
       createdAt: f.created_at ? new Date(f.created_at).getTime() : 0,
+      // 带整片刷机文件的(一键构建发布的)才能在「USB 刷机」里刷新板子
+      usbFlash: fs.existsSync(path.join(releases.partsDir(f.file), 'flash.json')),
     })),
   });
 });
@@ -374,9 +383,93 @@ router.delete('/api/admin/firmware/:id', needLogin, needAdminRole, async (req, r
   const f = await db.one('SELECT * FROM firmware WHERE id = ?', [req.params.id]);
   if (!f) return json(res, 404, { ok: false, message: '没有这个固件' });
   await db.run('DELETE FROM firmware WHERE id = ?', [req.params.id]);
-  try { fs.unlinkSync(path.join(FW_DIR, f.file)); } catch (_) {}
+  releases.removeFirmwareFiles(f.file);
   await audit(req.user.id, 'delete_firmware', f.version, '', clientIp(req));
   json(res, 200, { ok: true });
+});
+
+// ---- 远程升级(心跳捎命令,见 src/ota.js)
+router.post('/api/admin/ota', needLogin, needAdminRole, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const macs = Array.isArray(b.macs) ? b.macs.slice(0, 200) : [];
+    if (!macs.length) return json(res, 400, { ok: false, message: '没选板子' });
+    if (!b.fwId) return json(res, 400, { ok: false, message: '没选固件版本' });
+    const results = await ota.request(macs, b.fwId, req.user.id);
+    const okN = results.filter(r => r.ok).length;
+    await audit(req.user.id, 'ota_request', `fw=${b.fwId}`,
+      results.map(r => `${r.mac}:${r.ok ? '排队' : r.message}`).join('; ').slice(0, 1000), clientIp(req));
+    json(res, 200, { ok: true, queued: okN, results });
+  } catch (e) {
+    json(res, e.status || 500, { ok: false, message: e.message });
+  }
+});
+
+router.post('/api/admin/ota/cancel', needLogin, needAdminRole, async (req, res) => {
+  const mac = String((req.body || {}).mac || '').toLowerCase();
+  if (!mac) return json(res, 400, { ok: false, message: '缺少 mac' });
+  const done = await ota.cancel(mac);
+  if (done) await audit(req.user.id, 'ota_cancel', mac, '', clientIp(req));
+  json(res, 200, { ok: true, cancelled: done, message: done ? '已取消' : '没有待执行的升级' });
+});
+
+router.post('/api/admin/ota/auto', needLogin, needAdminRole, async (req, res) => {
+  const b = req.body || {};
+  const macs = Array.isArray(b.macs) ? b.macs.slice(0, 200) : [];
+  if (!macs.length) return json(res, 400, { ok: false, message: '没选板子' });
+  await ota.setAuto(macs, !!b.auto);
+  await audit(req.user.id, 'ota_auto', macs.join(',').slice(0, 128), b.auto ? '开' : '关', clientIp(req));
+  json(res, 200, { ok: true });
+});
+
+// ---- USB 整片刷机用的文件(浏览器里用 esptool-js 刷)
+//   src = fw-<firmware.id>(已发布的)或 build-<builds.id>(构建成功、还没发布的,方便先测再发)
+async function flashSource(src) {
+  const m = String(src || '').match(/^(fw|build)-(\d+)$/);
+  if (!m) return null;
+  if (m[1] === 'fw') {
+    const f = await db.one('SELECT * FROM firmware WHERE id = ?', [m[2]]);
+    if (!f) return null;
+    return { dir: releases.partsDir(f.file), app: path.join(FW_DIR, f.file),
+             version: f.version, label: `${f.version}(${f.channel},已发布)` };
+  }
+  const b = await builder.get(m[2]);
+  if (!b || b.kind !== 'firmware' || !b.artifact) return null;
+  const app = builder.artifactPath({ id: b.id, artifact: b.artifact });
+  return { dir: path.join(path.dirname(app), 'parts'), app,
+           version: b.versionName, label: `${b.versionName}(构建 #${b.id},未发布)` };
+}
+
+router.get('/api/admin/flash/:src', needLogin, async (req, res) => {
+  const s = await flashSource(req.params.src);
+  if (!s) return json(res, 404, { ok: false, message: '没有这个固件' });
+  let meta;
+  try { meta = JSON.parse(fs.readFileSync(path.join(s.dir, 'flash.json'), 'utf8')); } catch (_) {
+    return json(res, 409, { ok: false, message: '这个固件没有整片刷机文件(手工上传的只有 .bin),请用一键构建出的版本' });
+  }
+  const files = [];
+  for (const f of meta.files || []) {
+    const p = f.file === 'app' ? s.app : path.join(s.dir, f.file);
+    if (!fs.existsSync(p)) return json(res, 410, { ok: false, message: '文件缺失:' + f.name });
+    files.push({ name: f.name, address: f.address, size: fs.statSync(p).size,
+                 url: `/api/admin/flash/${req.params.src}/${f.name}` });
+  }
+  json(res, 200, { ok: true, version: s.version, label: s.label, chip: meta.chip,
+                   flashMode: meta.flashMode, flashFreq: meta.flashFreq, flashSize: meta.flashSize, files });
+});
+
+router.get('/api/admin/flash/:src/:name', needLogin, async (req, res) => {
+  const s = await flashSource(req.params.src);
+  if (!s) return res.status(404).send('没有这个固件');
+  let meta;
+  try { meta = JSON.parse(fs.readFileSync(path.join(s.dir, 'flash.json'), 'utf8')); } catch (_) {
+    return res.status(409).send('没有整片刷机文件');
+  }
+  const f = (meta.files || []).find(x => x.name === req.params.name);
+  if (!f) return res.status(404).send('没有这一段');
+  const p = f.file === 'app' ? s.app : path.join(s.dir, f.file);
+  if (!fs.existsSync(p)) return res.status(410).send('文件缺失');
+  res.type('application/octet-stream').sendFile(p);
 });
 
 // ---- APK

@@ -28,7 +28,8 @@ T_USER=tp_test                              # 临时实例里的测试账号
 T_PASS=tp_test_pw_$$
 FAILS=0                                     # 失败项计数
 SRV_PID=
-EXPECTED_NEW_TABLES="builds counters"       # 本分支迁移在正式库上**新建**的表(按字母序;其余一律不许变)
+EXPECTED_NEW_TABLES="board_ota builds counters"   # 本分支迁移在正式库上**新建**的表(按字母序;其余一律不许变)
+EXPECTED_NEW_COLS="boards.caps"                   # 本分支迁移给正式库**已有表**加的列(按字母序;其余一律不许加)
 
 log()  { echo "[$(date +%H:%M:%S)] $*"; }
 fail() { echo "  ❌ $*"; FAILS=$((FAILS + 1)); }
@@ -165,19 +166,28 @@ tmysql -e "CREATE DATABASE tp_prodcopy CHARACTER SET utf8mb4 COLLATE utf8mb4_uni
 tmysql tp_prodcopy < "$TMP/prod.sql" || fail "正式库结构导入失败"
 if start_server tp_prodcopy; then
   grep -E "\[迁移\]|加列" "$TMP/server_tp_prodcopy.log" | sed 's/^/  /'
-  if grep -q "加列" "$TMP/server_tp_prodcopy.log"; then fail "正式库结构上居然加了列"; else pass "没有给已有表加列"; fi
   dump_schema tp_prodcopy "$TMP/ref_after.txt" || exit 1
   diff "$TMP/ref.txt" "$TMP/ref_after.txt" > "$TMP/c.diff"
   CHANGED=$(grep -c '^<' "$TMP/c.diff")                                     # 被改/被删的(必须 0)
-  NEW_TABLES=$(grep -E '^> (列|索引)' "$TMP/c.diff" | awk '{print $3}' | cut -d. -f1 | sort -u | tr '\n' ' ' | sed 's/ $//')
-  # 正式库已经部署过本分支时,这些表早就在了 ⇒ 应当一项都不新增
+  # 新增项分两类:整张新表 / 已有表上的新列(已有表 = 正式库结构里本来就有这张表)
+  NEW_TABLES=''; NEW_COLS=''
+  for item in $(grep -E '^> (列|索引)' "$TMP/c.diff" | awk '{print $3}' | sort -u); do
+    tb=${item%%.*}
+    if grep -qE "^列 +$tb\." "$TMP/ref.txt"; then NEW_COLS="$NEW_COLS $item"; else NEW_TABLES="$NEW_TABLES $tb"; fi
+  done
+  NEW_TABLES=$(echo $NEW_TABLES | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/ $//')
+  NEW_COLS=$(echo $NEW_COLS | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/ $//')
+  # 正式库已经部署过本分支时,这些表 / 列早就在了 ⇒ 应当一项都不新增
   WANT_NEW=$(for t in $EXPECTED_NEW_TABLES; do
     grep -qE "^列 +$t\." "$TMP/ref.txt" || echo "$t"; done | sort -u | tr '\n' ' ' | sed 's/ $//')
-  [ -z "$WANT_NEW" ] && info "正式库已含「$EXPECTED_NEW_TABLES」(已部署过本分支),迁移应不改任何结构"
-  if [ "$CHANGED" -eq 0 ] && [ "$NEW_TABLES" = "$WANT_NEW" ]; then
-    pass "迁移只新增了表「$NEW_TABLES」($(grep -c '^>' "$TMP/c.diff") 项),已有表一项没动"
+  WANT_COLS=$(for c in $EXPECTED_NEW_COLS; do
+    grep -qE "^列 +$c( |$)" "$TMP/ref.txt" || echo "$c"; done | sort -u | tr '\n' ' ' | sed 's/ $//')
+  [ -z "$WANT_NEW$WANT_COLS" ] && info "正式库已含本分支的表和列(已部署过),迁移应不改任何结构"
+  if [ "$CHANGED" -eq 0 ] && [ "$NEW_TABLES" = "$WANT_NEW" ] && [ "$NEW_COLS" = "$WANT_COLS" ]; then
+    pass "迁移只新增了表「$NEW_TABLES」、给已有表加了列「$NEW_COLS」($(grep -c '^>' "$TMP/c.diff") 项),其余一项没动"
   else
-    fail "迁移对正式库结构的改动不符合预期(改动 $CHANGED 项,新表「$NEW_TABLES」):"; head -20 "$TMP/c.diff"
+    fail "迁移对正式库结构的改动不符合预期(改动 $CHANGED 项,新表「$NEW_TABLES」,新列「$NEW_COLS」,预期新表「$WANT_NEW」新列「$WANT_COLS」):"
+    head -20 "$TMP/c.diff"
   fi
   call_apis tp_prodcopy; stop_server
   # 再启动一次:迁移已记录,应提示"已是最新"
