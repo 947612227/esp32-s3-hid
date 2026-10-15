@@ -42,14 +42,17 @@ fail() { echo "  ❌ $*"; FAILS=$((FAILS + 1)); }
 pass() { echo "  ✅ $*"; }
 info() { echo "  ·  $*"; }
 
+# 安全停临时 MySQL 的公共函数
+source "$(cd "$(dirname "$0")" && pwd)/lib_tmp_mysql.sh"
+
 cleanup() {
   [ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null
   # 万一有测试实例的构建 scope 没停,按名字精确停掉
   for u in $(systemctl list-units --no-legend --all "${UNIT_PREFIX}*" 2>/dev/null | awk '{print $1}'); do
     systemctl stop "$u" 2>/dev/null
   done
-  if [ -f "$TMP/mysqld.pid" ]; then kill "$(cat "$TMP/mysqld.pid")" 2>/dev/null; sleep 2; fi
-  rm -rf "$TMP"
+  # 确认临时 MySQL 真的退出了才删目录(见 lib_tmp_mysql.sh)
+  stop_tmp_mysql "$TMP/mysqld.pid" "$TMP/data" && rm -rf "$TMP"
   [ -L "$SRV/node_modules" ] && rm -f "$SRV/node_modules"
   [ -f "$SRV/data/.created_by_test" ] && rm -rf "$SRV/data"
 }

@@ -32,10 +32,13 @@ fail() { echo "  ❌ $*"; FAILS=$((FAILS + 1)); }
 pass() { echo "  ✅ $*"; }
 info() { echo "  ·  $*"; }
 
+# 安全停临时 MySQL 的公共函数
+source "$(cd "$(dirname "$0")" && pwd)/lib_tmp_mysql.sh"
+
 cleanup() {
   [ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null
-  if [ -f "$TMP/mysqld.pid" ]; then kill "$(cat "$TMP/mysqld.pid")" 2>/dev/null; sleep 2; fi
-  rm -rf "$TMP"
+  # 确认临时 MySQL 真的退出了才删目录(见 lib_tmp_mysql.sh)
+  stop_tmp_mysql "$TMP/mysqld.pid" "$TMP/data" && rm -rf "$TMP"
   [ -L "$REPO/server/node_modules" ] && rm -f "$REPO/server/node_modules"
   [ -f "$REPO/server/data/.created_by_test" ] && rm -rf "$REPO/server/data"
 }
