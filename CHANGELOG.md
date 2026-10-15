@@ -1,6 +1,6 @@
 # 更新日志
 
-## 固件 1.3.0 / App 3.4(16) —— 稳定性与可维护性优化(分支 `opt/stability-20261014`,基于 `d4b105c`)
+## 固件 1.3.0 / App 3.5(17) —— 稳定性与可维护性优化(分支 `opt/stability-20261014`,基于 `d4b105c`)
 
 > 2026-10-14 已部署到正式服务器,分支**未合并**。一键检查:`bash scripts/check.sh`(需要板子/手机的用例另列在脚本输出里)。
 
@@ -12,6 +12,26 @@
 - 控制中心发布:OTA 固件 1.3.0(stable)、APK 16 / 3.4;下载页 `/download/` 的三个整片烧录包与 `version.json` 换成 1.3.0。
 - 测试板升到 1.3.0 后首次心跳带全量,正式库里该板 8 条 NULL 留底已补回。
 - `tools/upload-apk.sh`:修"服务器上"版本读不出来(列表接口字段是 `versionCode` 等,脚本按数据库列名读)。
+
+### App 3.5(17):蓝牙控制通道一次失败后再也连不上
+
+- 现象(2026-10-15):手机侧的蓝牙配对记录丢了,重新配对后触摸 HID 正常,但 App 的「蓝牙控制通道」一直停在
+  「没扫到板子」,只能走 WiFi;点「连接蓝牙控制」也没反应。
+- 原因:`Ble.connect()` 用 `connecting` 防止重复发起连接,但扫描超时、蓝牙不可用、扫描器不可用、扫描异常、
+  `connectGatt` 异常这几条失败路径只回调、不清 `connecting`,之后每次 `connect()` 都直接返回。
+- 修复:所有失败路径和 GATT 断开(含连接超时 status=147)统一走 `finishConnect(false)`;
+  成功时回调原来会被通知两次(`pendingConnect` 和 `waiters` 各一次),去掉 `pendingConnect`,只通知一次。
+- 真机验证(三星 S23 Ultra):关蓝牙 → 点「连接蓝牙控制」(扫描超时失败)→ 开蓝牙,连续几次「没扫到板子」后
+  第 10 秒自动恢复「就绪(蓝牙,MTU=255)」,请求走 `BLE /api/status`。
+
+### 测试板 USB 直连试验(未成功,已刷回蓝牙版)
+
+- 测试板(`28:84:85:89:78:c8`)刷 USB 版 1.3.0,原生 USB 口接手机。板子串口报 `HID: 就绪`(TinyUSB `mounted()` 为真),
+  但手机 `dumpsys usb` 里看到的是芯片自带的 `Espressif USB JTAG/serial debug unit`(0x303A:0x1001),
+  不是固件的 `HID Touch Injector`(0x303A:0x4004);`getevent` 里也没有板子的输入设备。原因未查明。
+- 2026-10-15 刷回蓝牙版 1.3.0;手机重新配对后 `getevent` 出现 `ESP32S3 Touch HID`,板子发的下滑手势能拉下通知栏。
+- App `Link.detectHid()` 会误报「USB 直插」:任何 Espressif 厂商号的 USB 设备都算(包括上面的 JTAG 口),
+  名字含 `touchpad` 的输入设备也算(三星自带 `sec_touchpad` 会命中)。未修改。
 
 ### 服务端:APK / 固件只保留最近 5 个版本
 

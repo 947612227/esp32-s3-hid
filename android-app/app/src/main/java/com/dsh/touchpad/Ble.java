@@ -160,7 +160,7 @@ public class Ble {
                 (BluetoothManager) appCtx.getSystemService(Context.BLUETOOTH_SERVICE);
         if (bm == null || bm.getAdapter() == null) {
             stateText = "蓝牙不可用";
-            if (onDone != null) onDone.done(null);
+            finishConnect(false);
             return;
         }
 
@@ -196,7 +196,7 @@ public class Ble {
             final BluetoothLeScanner sc = bm.getAdapter().getBluetoothLeScanner();
             if (sc == null) {
                 stateText = "扫描不可用";
-                if (onDone != null) onDone.done(null);
+                finishConnect(false);
                 return;
             }
             final boolean[] hit = {false};
@@ -219,20 +219,19 @@ public class Ble {
                     if (hit[0]) return;
                     try { sc.stopScan(cb); } catch (Throwable ignored) {}
                     stateText = "没扫到板子(先在系统蓝牙里配对 ESP32S3 Touch HID)";
-                    if (onDone != null) onDone.done(null);
+                    finishConnect(false);
                 }
             }, 8000);
         } catch (Throwable t) {
             android.util.Log.w("TouchBle", "扫描失败", t);
             stateText = "扫描失败:" + t.getMessage();
-            if (onDone != null) onDone.done(null);
+            finishConnect(false);
         }
     }
 
     private void connectGatt(BluetoothDevice dev, final Cb onDone) {
         try {
             if (gatt != null) { try { gatt.close(); } catch (Throwable ignored) {} gatt = null; }
-            pendingConnect = onDone;
             if (Build.VERSION.SDK_INT >= 23) {
                 gatt = dev.connectGatt(appCtx, false, gattCb, BluetoothDevice.TRANSPORT_LE);
             } else {
@@ -240,11 +239,9 @@ public class Ble {
             }
         } catch (Throwable t) {
             stateText = "连接失败:" + t.getMessage();
-            if (onDone != null) onDone.done(null);
+            finishConnect(false);
         }
     }
-
-    private Cb pendingConnect;
 
     private final BluetoothGattCallback gattCb = new BluetoothGattCallback() {
         @Override public void onConnectionStateChange(BluetoothGatt g, int status, int newState) {
@@ -255,12 +252,12 @@ public class Ble {
                 try { g.discoverServices(); } catch (Throwable ignored) {}
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 ready = false;
-                connecting = false;
                 stateText = "已断开";
                 rx = tx = null;
                 rxWant = 0; rxGot = 0; rxData = null;   // 半截的包丢掉
                 failQueue("连接断开");
                 failInflight("蓝牙连接断开");
+                finishConnect(false);                   // 连接超时(status=147)也走这里,等着的回调要有结果
             }
         }
 
@@ -381,11 +378,13 @@ public class Ble {
     /** 启动看门狗(连上后调一次) */
     private void startWatchdog() { ui.removeCallbacks(watchdog); ui.post(watchdog); }
 
+    /**
+     * 一次连接尝试结束(成功或任何一种失败)都必须走这里:
+     * 清掉 connecting,并通知 connect() 里登记的全部回调(每个只通知一次)。
+     * ⚠️ 漏掉 connecting=false 的话,之后所有 connect() 都会直接返回,再也连不上。
+     */
     private void finishConnect(boolean ok) {
         connecting = false;
-        Cb cb = pendingConnect;
-        pendingConnect = null;
-        if (cb != null) cb.done(ok ? "ok" : null);
         // 连接期间攒下的回调一起通知
         java.util.ArrayList<Cb> ws;
         synchronized (this) {
