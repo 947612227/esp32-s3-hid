@@ -2248,6 +2248,7 @@ public class MainActivity extends Activity {
             schedulerTick();          // 定时调度
             if (++linkTickN % 5 == 0) linkTick();   // 每 5 秒探一次连接方式
             maybeRelayBoard();        // 每 30 分钟把板子状态代报给服务器
+            maybePhoneHeartbeat();    // 每 2 分钟报一次手机自己(设备管理的「在线」)
             updateFloatSchedule();    // 悬浮窗倒计时
             syncFloatExecuting();     // 悬浮窗"执行中"状态
             if (tab == TAB_SCRIPTS) {
@@ -2996,6 +2997,21 @@ public class MainActivity extends Activity {
         flows.remove(name);
         fetchScripts();
         android.util.Log.i("TouchPad", "定时自测: 已清掉「" + name + "」");
+    }
+
+    /** 上次手机心跳的时刻(本机时间);启动时 startupPing 已经报过一次,从现在算起 */
+    private long lastPhoneBeatAt = System.currentTimeMillis();
+
+    /**
+     * 手机心跳:每 2 分钟报一次手机信息。
+     * ⚠️ 间隔必须小于服务端的在线窗口(ONLINE_MS = 5 分钟)。
+     *    板子连着时代报请求也会顺手刷新在线;板子没连上时就全靠这一条。
+     */
+    private void maybePhoneHeartbeat() {
+        long now = System.currentTimeMillis();
+        if (now - lastPhoneBeatAt < 120_000L) return;
+        lastPhoneBeatAt = now;
+        Server.reportPhone(this);
     }
 
     /** 上次为定时预读流程列表的时刻(本机时间,节流用) */

@@ -415,11 +415,13 @@ public class Server {
     }
 
     public static void startupPing(Context ctx) {
+        // 手机信息每次启动都报(一个小请求):升级后后台的「App 版本」马上就对。
+        // ⚠️ 以前和 App 列表绑在一起 6 小时才报一次 ⇒ 升到 3.6 后后台还显示 3.5(实测)
+        reportPhone(ctx);
         SharedPreferences sp = ctx.getSharedPreferences("board", Context.MODE_PRIVATE);
         long last = sp.getLong("lastReport", 0);
-        // 上次上报超过 6 小时才重报,别每次启动都传 App 列表
+        // App 列表大,上次上报超过 6 小时才重报
         if (System.currentTimeMillis() - last > 6 * 3600_000L) {
-            reportPhone(ctx);
             reportApps(ctx);
             sp.edit().putLong("lastReport", System.currentTimeMillis()).apply();
         }

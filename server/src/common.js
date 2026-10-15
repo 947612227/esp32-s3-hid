@@ -67,9 +67,31 @@ function needBoard(req, res, next) {
   return json(res, 401, { ok: false, message: '板子 token 不对' });
 }
 
+// 手机最近一次被"顺手刷新在线"的时刻(deviceId → 毫秒),节流用
+const phoneTouchAt = new Map();
+const PHONE_TOUCH_MS = 30 * 1000;   // 同一台手机 30 秒内只写一次库
+
+/**
+ * App 的请求顺手刷新这台手机的 last_seen(设备管理的「在线」就看它)。
+ *
+ * ⚠️ 以前只有 /app/phone、/app/apps 会刷新,而 App 只在启动时、且距上次超过 6 小时才报
+ *    ⇒ 开了一整天的手机,报完 5 分钟后就一直显示离线(实测 SM-S918U1 停在 08:43)。
+ *    其实 App 一直在发 代报板子 / 定时 / 连接方式 / 拉流程,而且都带 deviceId。
+ * 只 UPDATE 已登记的手机,不新建(新手机仍由 /app/phone 登记);写库失败不影响请求本身。
+ */
+function touchPhone(req) {
+  const id = String((req.body && req.body.deviceId) || req.query.deviceId || '').trim().slice(0, 64);
+  if (!id) return;
+  const now = Date.now();
+  if (now - (phoneTouchAt.get(id) || 0) < PHONE_TOUCH_MS) return;
+  if (phoneTouchAt.size > 5000) phoneTouchAt.clear();
+  phoneTouchAt.set(id, now);
+  db.run('UPDATE phones SET last_seen = NOW() WHERE device_id = ?', [id]).catch(() => {});
+}
+
 function needApp(req, res, next) {
   const t = req.get('X-Token') || req.query.token || '';
-  if (safeEqual(t, tokens.app)) return next();
+  if (safeEqual(t, tokens.app)) { touchPhone(req); return next(); }
   return json(res, 401, { ok: false, message: 'App token 不对' });
 }
 
