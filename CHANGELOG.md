@@ -43,6 +43,11 @@
   - 后台页面(Playwright 真浏览器):登录 → 一键构建页 → 开始构建 → 日志实时刷新 → 成功 → 发布 → APP 管理出现新版本,无 JS 报错。
   - 回归:`test_route_split`(旧路由逐行一致,只多登记的 8 条构建接口)、`test_schema_deploy`(正式库只新增 `builds`)、
     `test_flow_sync`、`test_flow_ver`、`test_version_prune` 全部通过。
+- 部署记录(2026-10-15 10:03):备份 `/root/touchpad-backup-20261015-100324-build/`(全库 + 目录);同步 11 个文件后重启,
+  迁移 003 新建 `builds`;工具链已装在 `/opt/tp-build/`(约 4.1G)。
+  正式环境真实构建一次固件 #1(`1.3.0-srvtest`,beta,**未发布**,说明写了「部署验证构建,请勿发布」):
+  96 秒、内存峰值 298 MB,期间 MySQL / 控制中心 / 发布机器人都正常;固件列表、APK 列表无变化。
+  这次构建也把 `/opt/tp-build/work/firmware/.pio` 编译缓存建好了。
 
 ### App 3.5(17):蓝牙控制通道一次失败后再也连不上
 
