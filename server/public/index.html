@@ -509,7 +509,8 @@
                 <div class="muted">{{ b.commitMsg }}</div></td>
               <td><b>{{ b.versionName }}</b>
                 <span class="muted" v-if="b.versionCode">({{ b.versionCode }})</span>
-                <span class="muted" v-if="b.channel"> {{ b.channel }}</span></td>
+                <span class="pill off" v-if="b.channel" style="margin-left:6px">{{ b.channel }}</span>
+                <div class="muted" v-if="b.notes">{{ b.notes }}</div></td>
               <td>{{ buildStatusText(b.status) }}
                 <div class="muted" v-if="b.error" style="color:var(--err)">{{ b.error }}</div></td>
               <td><span v-if="b.artifact">{{ size(b.size) }}
