@@ -60,6 +60,7 @@
     { k: 'users',    i: '👤', n: '用户管理' },
     { k: 'apps',     i: '📦', n: 'APP 管理' },
     { k: 'firmware', i: '💾', n: '固件管理' },
+    { k: 'build',    i: '🛠', n: '一键构建' },
     { k: 'logs',     i: '📋', n: '日志系统' },
     { k: 'stats',    i: '📊', n: '数据统计' },
   ];
@@ -110,6 +111,18 @@
       const flowDlg  = reactive({ show: false, mac: '', flows: [], history: [] });
       const polDlg   = reactive({ show: false, mac: '', mode: 'none', target: '' });
       const ledDlg   = reactive({ show: false, mac: '' });
+
+      // 一键构建:元信息(环境 / 分支 / 下一个 versionCode)、记录、两张表单、日志弹窗
+      const bmeta   = reactive({ env: null, branches: [], branchError: '', defaultBranch: '',
+                                 nextVersionCode: 0, latest: { apk: null, firmware: {} }, running: null,
+                                 repo: '' });
+      const builds  = ref([]);
+      const bform   = reactive({
+        app:      { branch: '', versionName: '', notes: '' },
+        firmware: { branch: '', versionName: '', channel: 'stable', notes: '' },
+      });
+      const logDlg  = reactive({ show: false, id: 0, text: '', offset: 0, status: '', follow: true });
+      let logTimer = null;
 
       /** 打开灯对话框(模板里直接改 ledDlg 也行,但集中一处更清楚) */
       function openLed(mac) { ledDlg.mac = mac; ledDlg.show = true; }
@@ -229,6 +242,113 @@
         st.total = d.total || 0; st.pages = d.pages || 1;
       }
 
+      // ---------------------------------------------------------------- 一键构建
+
+      async function loadBuildMeta() {
+        const d = await api('/api/admin/build/meta');
+        Object.assign(bmeta, {
+          env: d.env, branches: d.branches || [], branchError: d.branchError || '',
+          defaultBranch: d.defaultBranch || '', nextVersionCode: d.nextVersionCode || 0,
+          latest: d.latest || { apk: null, firmware: {} }, running: d.running, repo: d.repo || '',
+        });
+        // 分支默认选优化分支;已经选了的不覆盖(10 秒刷新一次,别把人家选的冲掉)
+        for (const k of ['app', 'firmware']) {
+          if (!bform[k].branch || !bmeta.branches.some(b => b.name === bform[k].branch)) {
+            bform[k].branch = bmeta.defaultBranch;
+          }
+        }
+      }
+      async function loadBuilds() {
+        const d = await api('/api/admin/builds');
+        builds.value = d.list || [];
+        bmeta.running = d.running;
+      }
+      function branchOf(name) { return bmeta.branches.find(b => b.name === name) || null; }
+      function envReady(k) { return !!(bmeta.env && bmeta.env[k] && bmeta.env[k].ready); }
+
+      const BUILD_STATUS = {
+        running: '⏳ 构建中', success: '✅ 成功(未发布)', failed: '❌ 失败',
+        cancelled: '⏹ 已取消', publishing: '⏳ 发布中', published: '🚀 已发布',
+      };
+      function buildStatusText(s) { return BUILD_STATUS[s] || s; }
+      /** 用时:跑完的用结束时间,在跑的用现在 */
+      function buildSecs(b) {
+        const end = b.finishedAt || (b.status === 'running' ? Date.now() : 0);
+        if (!end || !b.createdAt) return '—';
+        const s = Math.max(0, Math.round((end - b.createdAt) / 1000));
+        return s >= 60 ? Math.floor(s / 60) + ' 分 ' + (s % 60) + ' 秒' : s + ' 秒';
+      }
+
+      async function startBuild(kind) {
+        const f = bform[kind];
+        if (!f.branch) return alert('先选分支');
+        if (!f.versionName.trim()) return alert(kind === 'app' ? '要填版本名(如 3.6)' : '要填固件版本号(如 1.3.1)');
+        const what = kind === 'app'
+          ? `App ${f.versionName}(versionCode ${bmeta.nextVersionCode},自动取号)`
+          : `固件 ${f.versionName}(${f.channel} 渠道)`;
+        if (!confirm(`在服务器上构建 ${what}\n分支:${f.branch}\n\n`
+          + `构建完先放在构建记录里,检查没问题再点「发布」才会下发。`
+          + (kind === 'firmware' ? '\n固件首次构建要十几分钟,之后只编改动的文件。' : ''))) return;
+        const d = await api('/api/admin/builds', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind, branch: f.branch, versionName: f.versionName.trim(),
+                                 channel: f.channel, notes: f.notes }),
+        }).catch(e => { alert('没能开始构建:' + e.message); throw e; });
+        f.versionName = ''; f.notes = '';
+        await Promise.all([loadBuilds(), loadBuildMeta()]);
+        openLog(d.id);
+      }
+
+      async function publishBuild(b) {
+        const what = b.kind === 'app'
+          ? `App ${b.versionName}(versionCode ${b.versionCode})\n\n发布后手机打开 App 时会提示更新。`
+          : `固件 ${b.versionName} 到 ${b.channel} 渠道\n\n发布后这个渠道的板子会收到更新提示(在 App 里确认后才升级)。`;
+        if (!confirm('发布 ' + what + '\n旧版本按保留策略只留最近 5 个。')) return;
+        await api('/api/admin/builds/' + b.id + '/publish', { method: 'POST' })
+          .catch(e => { alert('发布失败:' + e.message); throw e; });
+        await loadBuilds();
+        alert('已发布,可以在「' + (b.kind === 'app' ? 'APP 管理' : '固件管理') + '」里看到');
+      }
+
+      async function cancelBuild(b) {
+        if (!confirm('停止构建 #' + b.id + '?')) return;
+        await api('/api/admin/builds/' + b.id + '/cancel', { method: 'POST' })
+          .catch(e => { alert('停止失败:' + e.message); throw e; });
+        setTimeout(loadBuilds, 1500);
+      }
+
+      /** 日志弹窗:每 2 秒追加读一次,构建结束后再读最后一次就停 */
+      function openLog(id) {
+        Object.assign(logDlg, { show: true, id, text: '', offset: 0, status: '', follow: true });
+        clearTimeout(logTimer);
+        pollLog();
+      }
+      async function pollLog() {
+        if (!logDlg.show) return;
+        const id = logDlg.id;
+        let d;
+        try { d = await api(`/api/admin/builds/${id}/log?offset=${logDlg.offset}`); } catch (e) { d = null; }
+        if (!logDlg.show || logDlg.id !== id) return;
+        if (d) {
+          if (d.text) {
+            logDlg.text += d.text;
+            if (logDlg.text.length > 2000000) logDlg.text = logDlg.text.slice(-1500000);
+          }
+          logDlg.offset = d.offset;
+          logDlg.status = d.status;
+          if (logDlg.follow) Vue.nextTick(() => {
+            const el = document.getElementById('buildLog');
+            if (el) el.scrollTop = el.scrollHeight;
+          });
+          // 还有没读完的(一次最多 256KB)就马上接着读
+          if (d.offset < d.size) { logTimer = setTimeout(pollLog, 50); return; }
+          if (d.done) { loadBuilds(); return; }
+        }
+        logTimer = setTimeout(pollLog, 2000);
+      }
+      function closeLog() { logDlg.show = false; clearTimeout(logTimer); }
+
       /** 只加载当前页要用的 —— 别一次拉全部 ✅ */
       function loadPage(p) {
         const jobs = [];
@@ -238,6 +358,7 @@
         if (p === 'users')    jobs.push(loadUsers());
         if (p === 'apps')     jobs.push(loadApk());
         if (p === 'firmware') jobs.push(loadFw());
+        if (p === 'build')    jobs.push(loadBuildMeta(), loadBuilds());
         if (p === 'flows')    jobs.push(loadFlows());
         if (p === 'logs')     jobs.push(loadAudit());
         if (p === 'stats')    jobs.push(loadStats(), loadEvents());
@@ -427,7 +548,7 @@
         timer2 = setInterval(() => loadPage(page.value), 10000);
       });
       let timer2 = null;
-      onUnmounted(() => { clearInterval(timer); clearInterval(timer2); });
+      onUnmounted(() => { clearInterval(timer); clearInterval(timer2); clearTimeout(logTimer); });
 
       return {
         // 状态
@@ -435,6 +556,7 @@
         summary, boards, phones, apks, fws, users, stats, statsSummary,
         events, audit, pg, apkForm, fwForm, newUser, dlg, flowDlg, polDlg, ledDlg, busy,
         flows, flowOwners, flowFilter,
+        bmeta, builds, bform, logDlg,
         // 方法
         go, loadAll, loadPage, loadBoards, loadPhones, loadApk, loadFw,
         loadUsers, loadStats, loadEvents, loadAudit, loadSummary, loadFlows,
@@ -443,6 +565,8 @@
         uploadApk, uploadFw, delFw,
         addUser, chpw, toggleUser, delUser,
         pgGo, pgInfo,
+        loadBuildMeta, loadBuilds, branchOf, envReady, buildStatusText, buildSecs,
+        startBuild, publishBuild, cancelBuild, openLog, closeLog,
         // 工具
         fmtTime, ago, size, linkName,
       };

@@ -28,7 +28,7 @@ T_USER=tp_test                              # 临时实例里的测试账号
 T_PASS=tp_test_pw_$$
 FAILS=0                                     # 失败项计数
 SRV_PID=
-EXPECTED_NEW_TABLES="counters"              # 本分支迁移在正式库上**新建**的表(其余一律不许变)
+EXPECTED_NEW_TABLES="builds counters"       # 本分支迁移在正式库上**新建**的表(按字母序;其余一律不许变)
 
 log()  { echo "[$(date +%H:%M:%S)] $*"; }
 fail() { echo "  ❌ $*"; FAILS=$((FAILS + 1)); }

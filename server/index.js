@@ -9,6 +9,7 @@
  *    src/routes/app.js     /api/v1/app/*     手机 App:APK 更新、手机信息、板子代报
  *    src/routes/flows.js   流程同步(App + 后台)
  *    src/routes/admin.js   /admin/login、/api/admin/*、/admin/ 看板
+ *    src/routes/build.js   /api/admin/build*   后台一键构建(逻辑在 src/builder.js)
  *    src/routes/static.js  /download、/admin/static、图标
  * ══════════════════════════════════════════════════════════════════
  */
@@ -61,6 +62,7 @@ app.use(require('./src/routes/board').router);
 app.use(require('./src/routes/app').router);
 app.use(require('./src/routes/flows').router);
 app.use(require('./src/routes/admin').router);
+app.use(require('./src/routes/build').router);
 app.use(require('./src/routes/static').router);
 
 // ================================================================ 启动
@@ -70,6 +72,7 @@ async function boot() {
   await db.initSchema();
   await require('./src/migrate').migrate();
   await require('./src/retention').pruneAll(null, '', '启动');
+  await require('./src/builder').recover();
 
   tokens.board = await db.getSetting('boardToken', '');
   tokens.app = await db.getSetting('appToken', '');

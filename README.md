@@ -976,6 +976,7 @@ python3 tools/verify_descriptor.py     # 检查开闭配对 + 关键字段位置
 | **热点兜底** | 连不上任何 WiFi 时自己开热点配网 |
 | **OTA 无线升级** | 不用插 USB;流程不会丢 |
 | **控制中心** | 多设备台账、固件/APK 分发、黑白名单、网页看板;APK 与每个渠道的固件只保留最近 5 个版本(上传后、启动时自动清理,被策略指定的固件不删) |
+| **后台一键构建** | 后台「🛠 一键构建」页:选分支、填版本号,在服务器上编 App / OTA 固件,看实时日志;编好先进构建记录,检查后点「发布」才下发(和手工上传走同一套入库 + 保留策略) |
 
 ### 手机 App
 
@@ -1099,6 +1100,17 @@ python3 tools/verify_descriptor.py     # 检查开闭配对 + 关键字段位置
 - [`docs/网页版对照迭代.md`](docs/网页版对照迭代.md) —— 板子自带网页控制台
 - [`docs/服务端方案设计.md`](docs/服务端方案设计.md) ⚠️ **已过时**(JSON 版,见文首提示)
 - [`docs/服务端部署记录.md`](docs/服务端部署记录.md) ⚠️ **已过时**(JSON 版,见文首提示)
+
+**后台一键构建**(`server/src/builder.js`、`server/tools/tp-build.sh`):
+
+- 首次使用先在服务器上装工具链(可重复执行):`bash server/tools/setup-build-env.sh`
+  → `/opt/tp-build/` 下 JDK 17、Android build-tools 35 / android-35、Python 3.11 + PlatformIO 6.1.16
+  (espressif32 7.1.3、Arduino 框架 4.20017.260907)、固件凭据 `secrets.h`(权限 600),另建 2G swap。
+- App:versionCode 自动取号(线上最大 + 1),versionName 页面填;固件:版本号、渠道页面填。版本号只写进构建副本,仓库代码不动。
+- 代码从 `/root/esp32-s3-hid` 用 `git archive` 只读导出(不切分支);同一时间只跑一个构建,
+  构建进程在 systemd scope 里限内存 1000M、nice/ionice 降优先级;服务重启时正在跑的构建标记失败。
+- 每类只保留最近 5 次构建的日志和产物;发布后的文件在 APK / 固件列表里另存一份。
+- 固件只编 `ble` 环境的 OTA 包;下载页 `/download/` 的整片烧录包仍用 Mac 上的 `tools/release-firmware.sh`。
 
 ### 📋 调研 / 事故
 

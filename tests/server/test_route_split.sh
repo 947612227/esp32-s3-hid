@@ -75,10 +75,25 @@ for side in old new; do
   grep -E '^(路由|中间件) ' "$TMP/routes_$side.raw" > "$TMP/routes_$side.txt"   # 去掉启动时打印的账号密码等
   echo "  · $side: $(grep -c '^路由' "$TMP/routes_$side.txt") 条路由,$(grep -c '^中间件' "$TMP/routes_$side.txt") 个中间件"
 done
-if [ -s "$TMP/routes_old.txt" ] && diff "$TMP/routes_old.txt" "$TMP/routes_new.txt" > "$TMP/routes.diff"; then
-  pass "路由表逐行一致(方法、路径、中间件链、顺序)"
+# 拆分之后**有意新增**的路由(后台一键构建 src/routes/build.js)。
+# 规则:旧路由一条不能少、不能变、顺序不能乱;新增的只能是这里登记的
+cat > "$TMP/expected_new_routes.txt" <<'EOF'
+路由 GET /api/admin/build/meta needLogin → <anonymous>
+路由 GET /api/admin/builds needLogin → <anonymous>
+路由 POST /api/admin/builds needLogin → needAdminRole → <anonymous>
+路由 GET /api/admin/builds/:id needLogin → <anonymous>
+路由 GET /api/admin/builds/:id/log needLogin → <anonymous>
+路由 GET /api/admin/builds/:id/artifact needLogin → <anonymous>
+路由 POST /api/admin/builds/:id/publish needLogin → needAdminRole → <anonymous>
+路由 POST /api/admin/builds/:id/cancel needLogin → needAdminRole → <anonymous>
+EOF
+diff "$TMP/routes_old.txt" "$TMP/routes_new.txt" > "$TMP/routes.diff"
+removed=$(grep -c '^<' "$TMP/routes.diff")
+grep '^>' "$TMP/routes.diff" | sed 's/^> //' > "$TMP/routes_added.txt"
+if [ -s "$TMP/routes_old.txt" ] && [ "$removed" = 0 ] && cmp -s "$TMP/routes_added.txt" "$TMP/expected_new_routes.txt"; then
+  pass "旧路由逐行一致(方法、路径、中间件链、顺序),只多了登记的 $(wc -l < "$TMP/routes_added.txt") 条构建接口"
 else
-  fail "路由表不一致:"; head -40 "$TMP/routes.diff"; cat "$TMP/routes_new.err" | head -20
+  fail "路由表不一致(少/改了 $removed 条,新增和登记的不符):"; head -40 "$TMP/routes.diff"; cat "$TMP/routes_new.err" | head -20
 fi
 
 # ---------------------------------------------------------------- 2. 请求回放

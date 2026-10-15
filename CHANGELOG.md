@@ -13,6 +13,37 @@
 - 测试板升到 1.3.0 后首次心跳带全量,正式库里该板 8 条 NULL 留底已补回。
 - `tools/upload-apk.sh`:修"服务器上"版本读不出来(列表接口字段是 `versionCode` 等,脚本按数据库列名读)。
 
+### 后台一键构建(App / 板子 OTA 固件)
+
+- 后台新增「🛠 一键构建」页:选分支(默认 `opt/stability-20261014`)、填版本号 → 在服务器上编译 → 看实时日志 →
+  构建记录里下载检查 → 点「🚀 发布」才写进 APK / 固件列表(手机提示更新、板子收到 OTA)。
+  - App:versionCode 自动取号 = max(线上 APK, 没失败的构建) + 1;发布时线上已有更大的号会拒绝(提示重新构建)。
+  - 固件:编 `ble` 环境的 OTA 包;版本号写进 `-DFW_VERSION`;同渠道已有同版本号不能建 / 发。
+  - 版本号只改 `git archive` 导出的副本,`/root/esp32-s3-hid` 只读(不 checkout,别的会话在用)。
+  - 新表 `builds`(迁移 003 + `schema.sql`);接口 `/api/admin/build/meta`、`/api/admin/builds*`(看:登录;建 / 发 / 停:管理员);
+    审计 `build_start` / `build_publish` / `build_cancel`,上架审计注明来自哪次构建。
+  - 手工上传和构建发布共用 `src/releases.js`(入库、sha256、审计、保留策略),上传接口行为不变。
+- 资源控制(服务器 2 核 1.7G,还跑 MySQL):同一时间只跑一个;构建进程放进 `systemd-run --scope -p MemoryLimit=1000M`,
+  `nice 10` + `ionice idle`,固件 `-j1`;超 40 分钟自动停;服务重启时停掉残留 scope 并标记失败;
+  每类只留最近 5 次构建的日志和产物。
+- 工具链 `server/tools/setup-build-env.sh`(装到 `/opt/tp-build/`,可重复执行):
+  JDK 17(清华 Adoptium)、build-tools 35 + android-35(腾讯云镜像,`android.jar` 与 Mac 一致)、
+  Python 3.11(python-build-standalone,校验 sha256)+ PlatformIO 6.1.16(阿里云 pip)、espressif32 7.1.3、
+  框架 4.20017.260907、NimBLE 2.5.1(构建时锁定)、`secrets.h`(从主仓库工作区复制,600)、2G swap(swappiness 10)。
+  - ⚠️ 不能用系统 Python 3.6:`tool-esptoolpy` 安装后要 pip 装 `cryptography~=46`,装不上就删掉自己的 `package.json`,
+    编译报 `MissingPackageManifestError`。
+  - ⚠️ 固件必须带和正式固件同一份 `secrets.h`:token 不对的固件 OTA 上去,板子心跳被拒,之后就收不到 OTA 了。
+- 实测(服务器上):
+  - App 11 秒、内存峰值约 150 MB;以 17 / 3.5 构建的 APK 和正式 APK 17(Mac 编)10 个文件**逐个 CRC 一致**(含 `classes.dex`)。
+  - 固件约 1.5 分钟(-j1)、内存峰值约 300 MB;1.3.0 构建产物 1287760 字节(Mac 1288000,差在编进去的源码路径长度)。
+    把服务器编的 1.3.0 烧到测试板:开机、连 WiFi、心跳被控制中心接受、蓝牙自动回连、注入滑动手机收到 26 个触摸坐标事件;
+    验证完已刷回 Mac 编的正式 1.3.0。
+  - `tests/server/test_build.sh`(临时 MySQL + 真工具链,约 4 分钟):取号、参数校验、只读账号、并发、APK 版本号与证书、
+    发布后手机检查更新 / 下载、旧号拒发、工具链损坏失败、记录保留、停止、重启打断、固件构建发布与 beta 心跳、主仓库不被改动 —— 全部通过。
+  - 后台页面(Playwright 真浏览器):登录 → 一键构建页 → 开始构建 → 日志实时刷新 → 成功 → 发布 → APP 管理出现新版本,无 JS 报错。
+  - 回归:`test_route_split`(旧路由逐行一致,只多登记的 8 条构建接口)、`test_schema_deploy`(正式库只新增 `builds`)、
+    `test_flow_sync`、`test_flow_ver`、`test_version_prune` 全部通过。
+
 ### App 3.5(17):蓝牙控制通道一次失败后再也连不上
 
 - 现象(2026-10-15):手机侧的蓝牙配对记录丢了,重新配对后触摸 HID 正常,但 App 的「蓝牙控制通道」一直停在

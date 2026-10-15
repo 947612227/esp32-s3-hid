@@ -6,9 +6,9 @@ const fs = require('fs');
 const path = require('path');
 const db = require('../db');
 const auth = require('../auth');
-const retention = require('../retention');
+const releases = require('../releases');
 const { decrypt } = require('../crypto');
-const { PUBLIC_DIR, FW_DIR, APK_DIR, BOOT_AT, ONLINE_MS, json, sha256File, clientIp, parseCookies, isOnline, audit, needLogin, needAdminRole, uploadFw, uploadApk } = require('../common');
+const { PUBLIC_DIR, FW_DIR, APK_DIR, BOOT_AT, ONLINE_MS, json, clientIp, parseCookies, isOnline, audit, needLogin, needAdminRole, uploadFw, uploadApk } = require('../common');
 
 const router = express.Router();
 
@@ -363,16 +363,11 @@ router.post('/api/admin/firmware', needLogin, needAdminRole, uploadFw.single('fi
   const body = req.body || {};
   const version = String(body.version || '').trim();
   if (!version) { fs.unlinkSync(req.file.path); return json(res, 400, { ok: false, message: '要填版本号' }); }
-  const name = `fw-${Date.now()}.bin`;
-  fs.renameSync(req.file.path, path.join(FW_DIR, name));
-  const r = await db.run(
-    `INSERT INTO firmware (version, channel, file, size, sha256, notes, created_by)
-     VALUES (?,?,?,?,?,?,?)`,
-    [version, body.channel === 'beta' ? 'beta' : 'stable', name, req.file.size,
-     sha256File(path.join(FW_DIR, name)), String(body.notes || ''), req.user.id]);
-  await audit(req.user.id, 'upload_firmware', version, `id=${r.insertId}`, clientIp(req));
-  const pruned = await retention.pruneAll(req.user.id, clientIp(req), '上传固件 ' + version);
-  json(res, 200, { ok: true, id: r.insertId, pruned });
+  const r = await releases.addFirmware({
+    src: req.file.path, move: true, version, channel: body.channel,
+    notes: body.notes, userId: req.user.id, ip: clientIp(req),
+  });
+  json(res, 200, { ok: true, id: r.id, pruned: r.pruned });
 });
 
 router.delete('/api/admin/firmware/:id', needLogin, needAdminRole, async (req, res) => {
@@ -412,16 +407,11 @@ router.post('/api/admin/apk', needLogin, needAdminRole, uploadApk.single('file')
   const body = req.body || {};
   const code = parseInt(body.versionCode || '0', 10);
   if (!code) { fs.unlinkSync(req.file.path); return json(res, 400, { ok: false, message: '要填 versionCode' }); }
-  const name = `touchpad-${code}-${Date.now()}.apk`;
-  fs.renameSync(req.file.path, path.join(APK_DIR, name));
-  const r = await db.run(
-    `INSERT INTO apks (version_code, version_name, file, size, sha256, notes, created_by)
-     VALUES (?,?,?,?,?,?,?)`,
-    [code, String(body.versionName || code), name, req.file.size,
-     sha256File(path.join(APK_DIR, name)), String(body.notes || ''), req.user.id]);
-  await audit(req.user.id, 'upload_apk', String(code), '', clientIp(req));
-  const pruned = await retention.pruneAll(req.user.id, clientIp(req), '上传 APK ' + code);
-  json(res, 200, { ok: true, id: r.insertId, pruned });
+  const r = await releases.addApk({
+    src: req.file.path, move: true, versionCode: code, versionName: body.versionName,
+    notes: body.notes, userId: req.user.id, ip: clientIp(req),
+  });
+  json(res, 200, { ok: true, id: r.id, pruned: r.pruned });
 });
 
 router.delete('/api/admin/apk/:id', needLogin, needAdminRole, async (req, res) => {
