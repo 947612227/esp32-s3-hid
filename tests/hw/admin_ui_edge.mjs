@@ -10,6 +10,7 @@
  *   截图存到 /tmp/tp-ui-*.png
  *
  * 用法: TP_ADMIN_PASS=后台密码 node tests/hw/admin_ui_edge.mjs [--base http://120.55.183.206] [--src fw-<id>]
+ *         [--expect-name ESP32-S3_098C --expect-remark 测试板2]   # 控制中心要显示的板子名字和备注
  */
 import { spawn } from 'child_process';
 import fs from 'fs';
@@ -105,6 +106,14 @@ try {
   ok(ctl.ths.includes('固件升级'), '控制中心表头有「固件升级」列');
   ok(ctl.bar && ctl.btn.some(t => t.includes('升级固件')) && ctl.btn.some(t => t.includes('开自动升级')), '批量操作栏:升级固件 / 开关自动升级');
   ok(ctl.cells.length > 0, `每块板子都有升级状态格(${ctl.cells.length} 块):` + ctl.cells.join(' | ').slice(0, 300));
+  // 板子名字 + 备注:--expect-name / --expect-remark 给了才查(如 ESP32-S3_098C / 测试板2)
+  const nm = await b.evalJs(`(() => ({ text: document.querySelector('section:not([style*="none"])')?.innerText || '',
+    edits: [...document.querySelectorAll('a,button,span')].filter(x => x.textContent.includes('✏️')).length }))()`);
+  ok(nm.edits > 0, `控制中心有改备注入口(✏️ ${nm.edits} 个)`);
+  if (args['expect-name']) {
+    ok(nm.text.includes(args['expect-name']) && (!args['expect-remark'] || nm.text.includes(args['expect-remark'])),
+      `控制中心显示 ${args['expect-name']} 和备注 ${args['expect-remark'] || '(不查)'}`);
+  }
   await b.shot('/tmp/tp-ui-control.png');
 
   await b.send('Page.navigate', { url: `${base}/admin/#usb` });
