@@ -76,6 +76,9 @@ CREATE TABLE IF NOT EXISTS boards (
   link_by       VARCHAR(64)  DEFAULT NULL COMMENT '哪个手机报的',
   link_at       DATETIME     DEFAULT NULL COMMENT '连接方式最后上报时间',
   caps          VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '固件能力(ota-remote = 支持后台远程升级)',
+  remark        VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '板子备注(如 大麦1号;以服务器为准,不能重名)',
+  remark_conflict VARCHAR(64) NOT NULL DEFAULT '' COMMENT '板子上改的、没被采用的备注(重名 / 不合法)',
+  remark_conflict_at DATETIME NULL COMMENT '没采用的备注是什么时候报上来的',
   INDEX (last_seen)
 ) ENGINE=InnoDB;
 

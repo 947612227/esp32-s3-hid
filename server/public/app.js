@@ -587,6 +587,26 @@
         await loadBoards();
       }
 
+      // ---------------------------------------------------------------- 备注
+
+      /** 名字 + 备注,如「ESP32-S3_098C(大麦1号)」 */
+      function boardLabel(name, remark) {
+        return (name || '') + (remark ? `(${remark})` : '');
+      }
+      /** 改备注:服务器查重,板子下次心跳(或 App 代报)时同步 */
+      async function editRemark(b) {
+        const v = prompt(`给 ${b.name || b.mac} 起个备注(最多 20 个字,不能和别的板子重名;留空 = 清掉):`,
+                         b.remark || '');
+        if (v === null) return;
+        const d = await api(`/api/admin/boards/${encodeURIComponent(b.mac)}/remark`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ remark: v }),
+        }).catch(e => { alert('没改成:' + e.message); throw e; });
+        alert(d.message);
+        await loadBoards();
+        if (dlg.show && dlg.mac === b.mac) await showBoard(b.mac);
+      }
+
       // ---------------------------------------------------------------- USB 刷机
 
       /** 可整片刷的来源:已发布固件(带刷机文件的)+ 构建成功还没发布的固件 */
@@ -685,6 +705,7 @@
         sel, selMacs, otaDlg, usb, usbSources,
         // 方法
         selAll, otaClass, openOta, sendOta, cancelOta, setOtaAuto, usbFlash,
+        boardLabel, editRemark,
         go, loadAll, loadPage, loadBoards, loadPhones, loadApk, loadFw,
         loadUsers, loadStats, loadEvents, loadAudit, loadSummary, loadFlows,
         setFlowStatus, flowStatus, flowStatusText, flowStatusClass,

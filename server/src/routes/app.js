@@ -6,8 +6,9 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const db = require('../db');
-const { APK_DIR, json, needApp } = require('../common');
+const { APK_DIR, json, needApp, audit, clientIp } = require('../common');
 const { applyBoardReport } = require('./board');
+const remark = require('../remark');
 
 const router = express.Router();
 
@@ -159,6 +160,9 @@ router.post('/api/v1/app/board-relay', needApp, async (req, res) => {
 
     // pubIp 留空、doGeo=false —— 手机的公网 IP 不能代表板子
     await applyBoardReport(b, mac, '', false);
+    // 备注:板子离线时在板子网页改的(status 里 remarkPending)也在这里查重;
+    // 回复里给服务器这份,App 发现和板子不一样就下发给板子
+    const rm = await remark.resolveReport(mac, st);
 
     // ⚠️⚠️ **把服务器存的板子命令捎回去**。
     //
@@ -179,12 +183,31 @@ router.post('/api/v1/app/board-relay', needApp, async (req, res) => {
     } catch (e) { /* 没有命令就算了 */ }
 
     console.log(`[relay] App 代报板子 ${mac}:${b.flows} 个流程,${b.flowNames ? b.flowNames.length : 0} 个名字`);
-    json(res, 200, { ok: true, led });
+    json(res, 200, { ok: true, led, remark: rm });
   } catch (e) {
     console.error('[relay] 出错', e.message);
     json(res, 500, { ok: false, message: e.message });
   }
 });
 
+/**
+ * App 改板子备注(先过服务器查重;成功后 App 自己下发给板子,板子不在身边就等心跳)
+ * 200 = 采用;409 = 重名;400 = 不合法;404 = 服务器还没这块板子
+ */
+router.post('/api/v1/app/board-remark', needApp, async (req, res) => {
+  try {
+    const p = req.body || {};
+    const mac = String(p.boardMac || '').toLowerCase().trim();
+    if (!mac) return json(res, 400, { ok: false, message: '缺少 boardMac' });
+    const r = await remark.setRemark(mac, p.remark);
+    if (r.ok && r.changed) {
+      await audit(null, 'board_remark', mac, `App(${String(p.deviceId || '').slice(0, 64)}):${r.remark}`, clientIp(req));
+    }
+    json(res, r.code, { ok: r.ok, remark: r.remark, message: r.message });
+  } catch (e) {
+    console.error('[remark] App 改备注出错', e.message);
+    json(res, 500, { ok: false, message: e.message });
+  }
+});
 
 module.exports = { router };

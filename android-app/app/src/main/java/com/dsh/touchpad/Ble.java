@@ -44,7 +44,10 @@ public class Ble {
     /** 通知开关(标准 CCCD) */
     private static final UUID CCCD = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
 
-    /** 板子 BLE 名(固件里写死的) */
+    /**
+     * 老固件(< 1.5.0)的 BLE 名。1.5.0 起蓝牙名是 ESP32-S3_XXXX(MAC 后两字节),
+     * 两种都含 "esp32",下面按「含 esp32」认。
+     */
     private static final String BLE_NAME = "ESP32S3 Touch HID";
 
     /**
@@ -165,14 +168,17 @@ public class Ble {
         }
 
         // ① 先在已配对里找 —— 正常情况下 HID 已经配好了
+        //    ⚠️ 配过好几块板子时,优先连**上次用的那块**(状态里读到的名字 ESP32-S3_XXXX);
+        //       以前所有板子同名,只能拿配对列表里的第一个,可能连错板子
         BluetoothDevice found = null;
         try {
+            String last = appCtx.getSharedPreferences("board", Context.MODE_PRIVATE)
+                    .getString("boardName", "");
             for (BluetoothDevice d : bm.getAdapter().getBondedDevices()) {
                 String nm = d.getName();
-                if (nm != null && (nm.contains(BLE_NAME) || nm.toLowerCase().contains("esp32"))) {
-                    found = d;
-                    break;
-                }
+                if (nm == null || !(nm.contains(BLE_NAME) || nm.toLowerCase().contains("esp32"))) continue;
+                if (!last.isEmpty() && nm.equals(last)) { found = d; break; }
+                if (found == null) found = d;
             }
         } catch (Throwable t) {
             android.util.Log.w("TouchBle", "读配对列表失败", t);
@@ -218,7 +224,7 @@ public class Ble {
                 @Override public void run() {
                     if (hit[0]) return;
                     try { sc.stopScan(cb); } catch (Throwable ignored) {}
-                    stateText = "没扫到板子(先在系统蓝牙里配对 ESP32S3 Touch HID)";
+                    stateText = "没扫到板子(先在系统蓝牙里配对 ESP32-S3_XXXX,老固件叫 ESP32S3 Touch HID)";
                     finishConnect(false);
                 }
             }, 8000);

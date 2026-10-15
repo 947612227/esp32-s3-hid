@@ -88,7 +88,7 @@ public class About {
 
         box.addView(h(act, "怎么用"));
         box.addView(p(act,
-                "1. 板子通电,手机蓝牙连上「ESP32S3 Touch HID」\n"
+                "1. 板子通电,手机蓝牙连上「ESP32-S3_XXXX」(老固件叫「ESP32S3 Touch HID」)\n"
                 + "2. 在本 App 顶部「地址」填板子 IP(板子串口日志里能看到)\n"
                 + "3. 右上角菜单 → App 列表,选目标应用\n"
                 + "4. 「手势」页可以边点边看坐标,先试落点\n"

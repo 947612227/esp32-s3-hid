@@ -202,6 +202,15 @@ String bleHandleCommand(const String &rawReq) {
   }
   if (op == "LOGCLR") { netManager().clearLogs(); return "{\"ok\":true}"; }
 
+  // ---------------------------------------------------------------- 备注
+  //   格式:REMARK <备注>(空 = 清掉)。和 HTTP 的 /api/remark?from=server 同一件事:
+  //   App 已经让服务器查过重了,板子照写
+  if (op == "REMARK") {
+    String why;
+    if (!remarkApplyFromServer(rest, why)) return err(why);
+    return "{\"ok\":true,\"remark\":\"" + esc(rest) + "\"}";
+  }
+
   // ---------------------------------------------------------------- 存一个流程
   //   格式:SAVE <index>\n<正文>
   //   index = -1 表示新建(正文第一行是流程名)

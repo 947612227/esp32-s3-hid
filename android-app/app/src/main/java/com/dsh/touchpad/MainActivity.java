@@ -809,6 +809,7 @@ public class MainActivity extends Activity {
                             running ? C_WARN : (lastOk ? C_OK : C_ERR));
 
                     statusCard.removeAllViews();
+                    addBoardNameRow(o);
                     statusCard.addView(kv("网络", mode + " · " + ip, 0));
                     statusCard.addView(kv("访问地址", Board.jstr(o, "url"), C_ACC));
                     statusCard.addView(kv("HID", hid ? "✅ 就绪" : "❌ 未连接",
@@ -839,6 +840,98 @@ public class MainActivity extends Activity {
                 }
             }
         });
+    }
+
+    // ================================================================ 板子名字 / 备注
+    //
+    //  名字(ESP32-S3_XXXX)是固件按 MAC 生成的,和蓝牙名、热点名一致,不能改;
+    //  备注(如「大麦1号」)**以服务器为准**:先让服务器查重,成功了再下发给板子。
+    //  老固件(< 1.5.0)状态里没有 remark 字段 ⇒ 不显示改备注入口。
+
+    /** 状态卡第一行:板子名字(备注),点一下改备注 */
+    private void addBoardNameRow(JSONObject st) {
+        final String name = Board.jstr(st, "name");
+        if (name.isEmpty() || !st.has("remark")) return;
+        final String mac = Board.jstr(st, "mac");
+        final String rm = Board.jstr(st, "remark");
+        getSharedPreferences("board", MODE_PRIVATE).edit().putString("boardName", name).apply();
+        View row = kv("板子", name + (rm.isEmpty() ? "" : "(" + rm + ")")
+                + (st.optBoolean("remarkPending", false) ? " · 备注待同步" : "")
+                + "   ✏️ 改备注", C_ACC);
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { showRemarkDialog(mac, name, rm); }
+        });
+        statusCard.addView(row);
+    }
+
+    private void showRemarkDialog(final String mac, final String name, String cur) {
+        LinearLayout box = Dialogs.column(this);
+        box.addView(Dialogs.label(this, "给 " + name + " 起个备注,比如「大麦1号」。\n"
+                + "最多 20 个字,不能和别的板子重名(服务器查重);留空 = 清掉。\n"
+                + "蓝牙名和热点名还是 " + name + ",不会变。"));
+        final EditText ed = new EditText(this);
+        ed.setSingleLine();
+        ed.setTextSize(15);
+        ed.setHint("如 大麦1号");
+        ed.setText(cur);
+        ed.setFilters(new android.text.InputFilter[]{ new android.text.InputFilter.LengthFilter(20) });
+        box.addView(ed);
+        Dialogs.show(this, "板子备注", box, "保存", new Dialogs.OnOk() {
+            @Override public void onOk() {
+                final String v = ed.getText().toString().trim();
+                toast("正在让服务器查重…");
+                Server.setBoardRemark(MainActivity.this, mac, v, new Server.Cb() {
+                    @Override public void done(final boolean ok, final String body) {
+                        runOnUiThread(new Runnable() {
+                            @Override public void run() { onRemarkSaved(ok, body, v); }
+                        });
+                    }
+                });
+            }
+        }, "取消");
+    }
+
+    private void onRemarkSaved(boolean ok, String body, String typed) {
+        String msg = "", saved = typed;
+        try {
+            JSONObject r = new JSONObject(body == null ? "{}" : body);
+            msg = r.optString("message", "");
+            saved = r.optString("remark", typed);
+        } catch (Throwable t) {
+            msg = body == null ? "" : body;
+        }
+        if (!ok) {
+            Dialogs.info(this, "备注没改成", msg.isEmpty() ? "连不上服务器(备注以服务器为准,要能连上才能改)" : msg);
+            return;
+        }
+        toast(msg);
+        pushRemarkToBoard(saved, true);
+    }
+
+    /** 代报回复里服务器那份和板子上的不一样(或板子上的待同步)⇒ 以服务器为准下发 */
+    private void syncRemarkToBoard(String statusBody, String serverRemark) {
+        if (serverRemark == null) return;                       // 老服务端
+        try {
+            JSONObject st = new JSONObject(statusBody == null ? "{}" : statusBody);
+            if (!st.has("remark")) return;                      // 老固件不认
+            if (serverRemark.equals(st.optString("remark", ""))
+                    && !st.optBoolean("remarkPending", false)) return;
+        } catch (Throwable t) {
+            return;
+        }
+        pushRemarkToBoard(serverRemark, false);
+    }
+
+    /** 把服务器确认过的备注写进板子(WiFi / 蓝牙都行;板子不在身边就等它心跳自己同步) */
+    private void pushRemarkToBoard(final String remark, final boolean refresh) {
+        board.post("/api/remark?remark=" + android.net.Uri.encode(remark) + "&from=server",
+                new Board.Cb() {
+                    @Override public void done(boolean ok, String body) {
+                        boardLog(ok ? "备注已同步到板子:「" + remark + "」"
+                                    : "备注下发板子没成功(板子联网后会自己从服务器同步):" + body);
+                        if (refresh) fetchStatus();
+                    }
+                });
     }
 
     /** 板子固件版本 + 「有新版本」提示(App 只提示,确认后才让板子去拉) */
@@ -2796,11 +2889,12 @@ public class MainActivity extends Activity {
                 //       所以后台的命令只能靠这里中转给板子。
                 Server.relayBoard(MainActivity.this, fMac, fName, statusBody, null, null,
                         new Server.RelayCb() {
-                            @Override public void done(final String ledJson) {
-                                if (ledJson == null || ledJson.isEmpty()) return;
+                            @Override public void done(final String ledJson, final String remark) {
                                 runOnUiThread(new Runnable() {
                                     @Override public void run() {
-                                        applyServerLed(ledJson);
+                                        if (ledJson != null && !ledJson.isEmpty()) applyServerLed(ledJson);
+                                        // 板子自己连不上服务器时,备注也只能靠 App 带过去
+                                        syncRemarkToBoard(statusBody, remark);
                                     }
                                 });
                             }
@@ -3175,7 +3269,7 @@ public class MainActivity extends Activity {
                         if (host == null) {
                             // UDP 没找到 → 再试板子的**热点地址**。
                             // 首次配置时板子还没连上任何 WiFi,只会开热点
-                            // (ESP32-Touch-XXXX),此时它就是 192.168.4.1。
+                            // (ESP32-S3_XXXX;1.5.0 以前的固件叫 ESP32-Touch-XXXX),此时它就是 192.168.4.1。
                             // 直接试这个地址就不用申请定位权限去读 SSID 了。
                             showApFallback(manual);
                             return;
@@ -3491,8 +3585,8 @@ public class MainActivity extends Activity {
         box.addView(Dialogs.value(this, "① 手机连板子的热点", C_ACC));
         box.addView(Dialogs.label(this,
                 "到 设置 → WLAN,找名字像\n"
-                + "　　ESP32-Touch-XXXX\n"
-                + "的热点(XXXX 是板子 MAC 后两位),密码:12345678"));
+                + "　　ESP32-S3_XXXX\n"
+                + "的热点(XXXX 是板子 MAC 最后 4 位;老固件叫 ESP32-Touch-XXXX),密码:12345678"));
 
         box.addView(Dialogs.value(this, "② 回到本 App", C_ACC));
         box.addView(Dialogs.label(this,
@@ -3946,7 +4040,7 @@ public class MainActivity extends Activity {
         TextView t3 = new TextView(this);
         t3.setTextSize(12);
         t3.setTextColor(C_DIM);
-        t3.setText("蓝牙设置 → ESP32S3 Touch HID 右侧齿轮 → 把「文本输入」关掉。\n"
+        t3.setText("蓝牙设置 → ESP32-S3_XXXX(老固件叫 ESP32S3 Touch HID)右侧齿轮 → 把「文本输入」关掉。\n"
                 + "这等于告诉系统:别把它当输入设备。可能是最彻底的方案。");
         box.addView(t3);
 

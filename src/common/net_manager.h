@@ -114,3 +114,19 @@ private:
 };
 
 NetManager &netManager();
+
+// ---- 板子名字 + 备注 ----
+//  名字:ESP32-S3_ + WiFi MAC 后两字节(如 ESP32-S3_098C),蓝牙名 / 热点名 / 心跳里都用它,
+//        按 MAC 来的所以天然不重名;固定不可改。
+//  备注:用户起的(如「大麦1号」),存 NVS;**以服务器为准**(服务器负责查重)。
+//        ⚠️ 不进蓝牙名:广播包里留给名字的只有 20 字节,中文一个字 3 字节,放不下。
+
+/** 板子名字(ESP32-S3_XXXX),任何时候都能调(直接读 eFuse 里的 MAC) */
+const char *boardBaseName();
+
+/**
+ * 写入**服务器已确认过**的备注(App 先过了服务器查重再下发,或心跳回复带下来的)。
+ * @param why 不合法时的原因
+ * @return false = 备注不合法,没写
+ */
+bool remarkApplyFromServer(const String &remark, String &why);

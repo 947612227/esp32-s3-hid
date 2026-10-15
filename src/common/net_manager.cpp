@@ -11,6 +11,7 @@
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <mbedtls/sha256.h>
+#include <esp_mac.h>
 
 #include "hid_report_map.h"
 #include "hid_touch.h"
@@ -29,8 +30,9 @@
 #define WIFI_PASS "CHANGE_ME"
 #endif
 
-#ifndef AP_SSID_PREFIX
-#define AP_SSID_PREFIX "ESP32-Touch"
+// 板子名字前缀:蓝牙名 / 热点名 / 心跳名都是「前缀_MAC 后两字节」(如 ESP32-S3_098C)
+#ifndef BOARD_NAME_PREFIX
+#define BOARD_NAME_PREFIX "ESP32-S3"
 #endif
 #ifndef AP_PASS
 #define AP_PASS "12345678"
@@ -60,6 +62,12 @@ static uint32_t s_schedNextAt = 0;
 // 放在板子侧而不是 App 侧:App 被杀掉也能按时停,不会一直点下去。
 static uint32_t s_schedDurationMs = 0;
 static uint32_t s_schedEndAt = 0;
+
+// 板子名字 / 备注(实现见「板子名字 + 备注」一节;/api/status 也要用)
+#define REMARK_MAX_BYTES 60                 // 服务器限 20 个字;中文一字 3 字节
+static char s_boardName[20] = {0};          // ESP32-S3_XXXX(懒加载)
+static char s_remark[REMARK_MAX_BYTES + 4] = {0};
+static bool s_remarkPending = false;        // 板子上改的、还没被服务器确认
 
 void requestScriptRun(uint8_t index, uint16_t repeat, uint32_t intervalMs) {
   s_request.index = (int)index;
@@ -414,6 +422,10 @@ j += "\"page\":\"" + String(pageAct()) + "\",";
   j += "\"pageText\":\"" + String(ptBuf) + "\",";
 }
 j += "\"mac\":\"" + WiFi.macAddress() + "\",";
+// 名字 / 备注(App 有 remark 字段才认为这版固件能改备注)
+j += "\"name\":\"" + String(boardBaseName()) + "\",";
+j += "\"remark\":\"" + jsonEscape(String(s_remark)) + "\",";
+j += "\"remarkPending\":" + String(s_remarkPending ? "true" : "false") + ",";
 j += "\"pageAt\":" + String(pageSeenAt()) + ",";
 j += "\"fwUpdate\":" + fwUpdateJson() + ",";
 j += "\"ip\":\"" + s_net.ip() + "\",";
@@ -967,6 +979,142 @@ static void saveWifiToPrefs(const String& ssid, const String& pass) {
   p.end();
 }
 
+// ---------------------------------------------------------------------------
+//  板子名字 + 备注(声明和规则见 net_manager.h)
+//
+//  备注以服务器为准:
+//    · 板子网页改 → 先问服务器查重;服务器连不上就先存板子上、标「待同步」,
+//      下次心跳带上去,服务器发现重名就不采用、回复里给回它那份
+//    · 后台 / App 改 → 服务器查过重,由心跳回复(或 App 直接)下发,板子照写
+//    · 心跳回复里总带服务器那份备注,和板子不一样就以服务器为准
+// ---------------------------------------------------------------------------
+
+const char *boardBaseName() {
+  if (!s_boardName[0]) {
+    uint8_t m[6] = {0};
+    esp_read_mac(m, ESP_MAC_WIFI_STA);      // 和 WiFi.macAddress() 是同一个 MAC
+    snprintf(s_boardName, sizeof(s_boardName), "%s_%02X%02X", BOARD_NAME_PREFIX, m[4], m[5]);
+  }
+  return s_boardName;
+}
+
+static void loadRemarkFromPrefs() {
+  Preferences p;
+  if (!p.begin("board", true)) return;      // 没写过时命名空间不存在,正常
+  String r = p.getString("remark", "");
+  strncpy(s_remark, r.c_str(), sizeof(s_remark) - 1);
+  s_remarkPending = p.getBool("rmPend", false);
+  p.end();
+}
+
+static void saveRemark(const String &r, bool pending) {
+  strncpy(s_remark, r.c_str(), sizeof(s_remark) - 1);
+  s_remark[sizeof(s_remark) - 1] = 0;
+  s_remarkPending = pending;
+  Preferences p;
+  if (!p.begin("board", false)) { LOGF("%s 备注写 NVS 失败", TAG); return; }
+  p.putString("remark", s_remark);
+  p.putBool("rmPend", pending);
+  p.end();
+}
+
+/** 板子侧的粗校验(细规则 —— 字数、查重 —— 以服务器为准) */
+static bool remarkValid(const String &r, String &why) {
+  if (r.length() > REMARK_MAX_BYTES) { why = "备注太长(最多 20 个字)"; return false; }
+  for (size_t i = 0; i < r.length(); i++) {
+    char c = r[i];
+    if (c == '"' || c == '\\' || (uint8_t)c < 0x20) {
+      why = "备注不能含引号、反斜杠或换行";
+      return false;
+    }
+  }
+  return true;
+}
+
+bool remarkApplyFromServer(const String &remark, String &why) {
+  String r = remark;
+  r.trim();
+  if (!remarkValid(r, why)) return false;
+  if (r != s_remark || s_remarkPending) {
+    LOGF("%s 备注更新:「%s」→「%s」(服务器已确认)", TAG, s_remark, r.c_str());
+    saveRemark(r, false);
+  }
+  return true;
+}
+
+/**
+ * 让服务器查重并保存备注。
+ * @return HTTP 状态码(200 = 采用;409 = 重名;400 = 不合法);负数 = 连不上
+ */
+static int remarkAskServer(const String &r, String &msg) {
+  HTTPClient http;
+  http.setConnectTimeout(4000);
+  http.setTimeout(6000);
+  if (!http.begin(String(SERVER_URL) + "/api/v1/board/remark")) return -1;
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("X-Token", SERVER_TOKEN);
+  String body = "{\"mac\":\"" + WiFi.macAddress() + "\",\"remark\":\"" + jsonEscape(r) + "\"}";
+  int code = http.POST(body);
+  if (code > 0) {
+    String resp = http.getString();
+    int i = resp.indexOf("\"message\":\"");
+    if (i >= 0) {
+      int e = resp.indexOf('"', i + 11);
+      if (e > i) msg = resp.substring(i + 11, e);
+    }
+  }
+  http.end();
+  return code;
+}
+
+/**
+ * 改备注:POST /api/remark?remark=xxx[&from=server]
+ *   from=server:App 已经让服务器查过重了,直接写
+ *   不带:板子网页改的 —— 先问服务器;连不上就先存、标待同步
+ */
+static void handleRemark() {
+  if (!s_server.hasArg("remark")) {
+    s_server.send(400, "application/json", "{\"ok\":false,\"message\":\"缺少 remark\"}");
+    return;
+  }
+  String r = s_server.arg("remark");
+  r.trim();
+  String why;
+  if (!remarkValid(r, why)) {
+    s_server.send(400, "application/json", "{\"ok\":false,\"message\":\"" + why + "\"}");
+    return;
+  }
+  if (s_server.arg("from") == "server") {
+    remarkApplyFromServer(r, why);
+    s_server.send(200, "application/json",
+                  "{\"ok\":true,\"remark\":\"" + jsonEscape(String(s_remark)) + "\"}");
+    return;
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    String msg;
+    int code = remarkAskServer(r, msg);
+    if (code == 200) {
+      saveRemark(r, false);
+      LOGF("%s 备注已改为「%s」(服务器已同步)", TAG, s_remark);
+      s_server.send(200, "application/json",
+                    "{\"ok\":true,\"remark\":\"" + jsonEscape(String(s_remark)) +
+                    "\",\"message\":\"已保存,服务器已同步\"}");
+      return;
+    }
+    if (code == 409 || code == 400) {
+      LOGF("%s 备注「%s」被服务器拒绝:%s", TAG, r.c_str(), msg.c_str());
+      s_server.send(code, "application/json",
+                    "{\"ok\":false,\"message\":\"" + jsonEscape(msg.length() ? msg : String("服务器拒绝")) + "\"}");
+      return;
+    }
+    LOGF("%s 改备注:服务器没回应(%d),先存板子上", TAG, code);
+  }
+  saveRemark(r, true);
+  s_server.send(200, "application/json",
+                "{\"ok\":true,\"pending\":true,\"remark\":\"" + jsonEscape(String(s_remark)) +
+                "\",\"message\":\"服务器暂时连不上,已先存在板子上,下次心跳再同步(重名会被服务器拒绝)\"}");
+}
+
 /**
  * 配网接口:POST /api/wifi?ssid=xxx&pass=yyy
  *
@@ -1321,6 +1469,9 @@ static void handleNotFound() {
 //  NetManager
 // ---------------------------------------------------------------------------
 bool NetManager::begin() {
+  loadRemarkFromPrefs();
+  LOGF("%s 板子名字:%s,备注:%s%s", TAG, boardBaseName(), s_remark[0] ? s_remark : "(无)",
+       s_remarkPending ? "(待同步)" : "");
   // 优先用 NVS 里保存的凭据(手机配网写入),没有则用编译期默认值
   loadWifiFromPrefs();
   const char* ssid = s_wifiSsid.length() ? s_wifiSsid.c_str() : WIFI_SSID;
@@ -1345,10 +1496,8 @@ bool NetManager::begin() {
     LOGF("%s 连接失败(%d),回退到热点模式", TAG, (int)WiFi.status());
     WiFi.mode(WIFI_AP);
     WiFi.setSleep(true);
-    char apSsid[40];
-    uint8_t mac[6];
-    WiFi.macAddress(mac);
-    snprintf(apSsid, sizeof(apSsid), "%s-%02X%02X", AP_SSID_PREFIX, mac[4], mac[5]);
+    // 热点名就是板子名字(和蓝牙名一致,几块板子一起开热点也分得清)
+    const char *apSsid = boardBaseName();
     if (!WiFi.softAP(apSsid, AP_PASS)) {
       LOGF("%s 热点也起不来,Web 管理不可用", TAG);
       return false;
@@ -1385,6 +1534,7 @@ bool NetManager::begin() {
   s_server.on("/api/logs/clear", HTTP_POST, handleClearLogs);
   s_server.on("/api/led", HTTP_GET, handleLed);
   s_server.on("/api/led", HTTP_POST, handleLed);
+  s_server.on("/api/remark", HTTP_POST, handleRemark);
   s_server.onNotFound(handleNotFound);
 
   s_server.enableCORS(true);
@@ -1482,7 +1632,12 @@ static void hbSend() {
 
   String body = "{";
   body += "\"mac\":\"" + WiFi.macAddress() + "\",";
-  body += "\"name\":\"ESP32-Touch\",";
+  body += "\"name\":\"" + String(boardBaseName()) + "\",";
+  // 备注:只有板子上改过、服务器还没确认时才带(服务器查重,重名就不采用)
+  if (s_remarkPending) {
+    String rm; hbJsonEscape(rm, String(s_remark));
+    body += "\"remark\":\"" + rm + "\",\"remarkPending\":true,";
+  }
   body += "\"fw\":\"" + String(FW_VERSION) + "\",";
   body += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
   body += "\"channel\":\"stable\",";
@@ -1595,6 +1750,22 @@ static void hbSend() {
     LOGF("%s 心跳成功(固件更新:%s,%u 字节,%s)", TAG, s_fwHasUpdate ? "有" : "无",
          (unsigned)body.length(), sendFlows ? "含流程列表" : "流程未变未带");
     s_otaRepState[0] = 0;   // 推迟/失败原因已经报上去了
+
+    // ---- 备注:以服务器为准(回复里总带服务器那份;老服务端不带就不动)----
+    if (resp.indexOf("\"remark\":") >= 0) {
+      char rm[REMARK_MAX_BYTES + 4] = {0};
+      jsonPick(resp, "remark", rm, sizeof(rm));
+      const bool wasPending = s_remarkPending;
+      const String mine(s_remark);
+      String why;
+      if (!remarkApplyFromServer(String(rm), why)) {
+        LOGF("%s 服务器给的备注不合法(%s),忽略", TAG, why.c_str());
+      } else if (wasPending) {
+        if (mine == rm) LOGF("%s 板子上改的备注已同步到服务器:「%s」", TAG, rm);
+        else LOGF("%s 板子上改的备注「%s」没被服务器采用(重名?),按服务器改回「%s」",
+                  TAG, mine.c_str(), rm);
+      }
+    }
 
     // ---- 下行命令:后台远程升级 ----
     // ⚠️ 只在 "ota":{...} 这一段里取字段 —— 回复里 firmware 段也有 version/url/sha256

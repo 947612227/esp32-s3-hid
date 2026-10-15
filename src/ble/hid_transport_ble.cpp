@@ -22,6 +22,7 @@
 #include "../common/hid_report_map.h"
 #include "../common/log_buffer.h"
 #include "../common/hid_transport.h"
+#include "../common/net_manager.h"   // boardBaseName()
 
 namespace {
 
@@ -40,7 +41,9 @@ const uint8_t HID_INFO[4] = {0x11, 0x01, 0x00, 0x02};
 // PnP ID: sig=1(Bluetooth SIG), vid=0x303A(Espressif), pid, version
 const uint8_t PNP_ID[7] = {0x01, 0x02, 0x0A, 0x00, 0x04, 0x40, 0x01};
 
-const char *DEVICE_NAME = "ESP32S3 Touch HID";
+// 蓝牙名 = 板子名字 ESP32-S3_XXXX(MAC 后两字节,见 net_manager.h)。
+// ⚠️ 以前所有板子都叫「ESP32S3 Touch HID」,同一部手机配了两块就分不清。
+//    App 认板子用的是「名字里有 esp32」,新名字照样认。
 
 // ---- 自定义「控制通道」UUID ----
 //  HID 服务是标准 HOGP,只能注入触摸;
@@ -82,7 +85,7 @@ public:
     // 控制通道收包缓冲的锁:onWrite 跑在 NimBLE 任务里,serviceControl 跑在 loop 任务里
     _rxMtx = xSemaphoreCreateMutex();
     if (_rxMtx == nullptr) return false;
-    NimBLEDevice::init(DEVICE_NAME);
+    NimBLEDevice::init(boardBaseName());
     // 默认用 Just Works 配对;如需固定 PIN,取消下面注释
     // NimBLEDevice::setSecurityPasskey(123456);
     NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
@@ -175,7 +178,7 @@ public:
     //
     //    改成:App 连上之后**做服务发现**时再查有没有 A5C1 ——
     //    一样能认出"这块板子支持蓝牙控制",而且不占广播空间。
-    adv->setName(DEVICE_NAME);
+    adv->setName(boardBaseName());
     adv->enableScanResponse(true);
     adv->start();
 

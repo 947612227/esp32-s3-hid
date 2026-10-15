@@ -29,7 +29,7 @@ T_PASS=tp_test_pw_$$
 FAILS=0                                     # 失败项计数
 SRV_PID=
 EXPECTED_NEW_TABLES="board_ota builds counters"   # 本分支迁移在正式库上**新建**的表(按字母序;其余一律不许变)
-EXPECTED_NEW_COLS="boards.caps"                   # 本分支迁移给正式库**已有表**加的列(按字母序;其余一律不许加)
+EXPECTED_NEW_COLS="boards.caps boards.remark boards.remark_conflict boards.remark_conflict_at"   # 本分支迁移给正式库**已有表**加的列(按字母序;其余一律不许加)
 
 log()  { echo "[$(date +%H:%M:%S)] $*"; }
 fail() { echo "  ❌ $*"; FAILS=$((FAILS + 1)); }

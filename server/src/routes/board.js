@@ -7,8 +7,9 @@ const path = require('path');
 const http = require('http');
 const db = require('../db');
 const ota = require('../ota');
+const remark = require('../remark');
 const { encrypt } = require('../crypto');
-const { FW_DIR, HEARTBEAT_KEEP_DAYS, json, clientIp, needBoard } = require('../common');
+const { FW_DIR, HEARTBEAT_KEEP_DAYS, json, clientIp, needBoard, audit } = require('../common');
 
 const router = express.Router();
 
@@ -257,6 +258,8 @@ router.post('/api/v1/board/heartbeat', needBoard, async (req, res) => {
     }
     // 后台远程升级:这次要不要带升级命令(忙 / 快到定时任务 / 老固件 ⇒ 不带)
     const otaFw = await ota.decide(b, mac, fw);
+    // 备注:板子带了「待同步」的就查重采用;回复里总带服务器这份(老固件不认这个字段,无害)
+    const rm = await remark.resolveReport(mac, b);
 
     // 板子这次没带流程列表(它认为没变),但服务器这边一条都没有
     // (库是新的 / 板子被从看板删过),或者有留底内容是 NULL
@@ -290,6 +293,7 @@ router.post('/api/v1/board/heartbeat', needBoard, async (req, res) => {
       firmware: fw ? ota.fwDto(fw, host) : { hasUpdate: false },
       led,
       needFlows,
+      remark: rm,
     };
     if (otaFw) {
       const d = ota.fwDto(otaFw, host);
@@ -298,6 +302,24 @@ router.post('/api/v1/board/heartbeat', needBoard, async (req, res) => {
     json(res, 200, out);
   } catch (e) {
     console.error('心跳失败:', e);
+    json(res, 500, { ok: false, message: e.message });
+  }
+});
+
+/**
+ * 板子网页改备注:板子转发过来让服务器查重(以服务器为准)。
+ * 200 = 采用;409 = 重名;400 = 不合法;404 = 服务器还没这块板子(板子会先存着、心跳再同步)
+ */
+router.post('/api/v1/board/remark', needBoard, async (req, res) => {
+  try {
+    const p = req.body || {};
+    const mac = String(p.mac || '').toLowerCase().trim();
+    if (!mac) return json(res, 400, { ok: false, message: '缺少 mac' });
+    const r = await remark.setRemark(mac, p.remark);
+    if (r.ok && r.changed) await audit(null, 'board_remark', mac, `板子网页:${r.remark}`, clientIp(req));
+    json(res, r.code, { ok: r.ok, remark: r.remark, message: r.message });
+  } catch (e) {
+    console.error('[remark] 板子改备注出错', e.message);
     json(res, 500, { ok: false, message: e.message });
   }
 });

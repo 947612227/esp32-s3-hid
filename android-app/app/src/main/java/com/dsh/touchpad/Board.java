@@ -203,6 +203,8 @@ public class Board {
         if (p.equals("/api/script"))   return "GET " + arg(query, "index");
         if (p.equals("/api/run"))      return "RUN " + arg(query, "index");
         if (p.equals("/api/delete"))   return "DEL " + arg(query, "name");
+        // 备注:App 只在服务器查过重之后才下发(from=server),蓝牙那边 REMARK 就是这个意思
+        if (p.equals("/api/remark"))   return "REMARK " + arg(query, "remark");
 
         if (p.equals("/api/page")) {
             // ⚠️ 这条的参数在 **query** 里(见 pushPage),不在正文里 ——
@@ -275,7 +277,8 @@ public class Board {
         return path.startsWith("/api/save") || path.startsWith("/api/delete")
             || path.startsWith("/api/run") || path.startsWith("/api/stop")
             || path.startsWith("/api/schedule") || path.startsWith("/api/system")
-            || path.startsWith("/api/logs/clear") || path.startsWith("/api/log");
+            || path.startsWith("/api/logs/clear") || path.startsWith("/api/log")
+            || path.startsWith("/api/remark");     // 状态里带备注
     }
 
     private void dropCache() {

@@ -79,6 +79,7 @@ static const char PAGE_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
 </style></head><body>
 <header>
   <h1>ESP32-S3 触摸注入板</h1>
+  <span id="bName" class="muted"></span>
   <span id="pNet" class="pill">连接中…</span>
   <span id="pHid" class="pill">HID</span>
   <span id="pRun" class="pill">空闲</span>
@@ -148,6 +149,12 @@ static const char PAGE_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
       <span class="muted">毫秒</span>
       <button class="primary" onclick="schedStart()">开始</button>
       <button onclick="schedStop()">停止</button>
+    </div>
+    <div class="row" style="margin-bottom:8px">
+      <span class="muted">板子备注(如 大麦1号,最多 20 字,不能和别的板子重名):</span>
+      <input id="remarkIn" placeholder="不填 = 清掉备注" maxlength="20" style="width:160px" oninput="this.dataset.touched=1">
+      <button class="primary" onclick="remarkSet()">保存备注</button>
+      <span class="muted" id="remarkTip"></span>
     </div>
     <div class="row" style="margin-bottom:8px">
       <span class="muted">给板子配网(改 WiFi):</span>
@@ -272,6 +279,13 @@ async function loadAll() {
   if (s.message && !s.mode) { note(s.message); return; }
 
   const pn = $('#pNet'), ph = $('#pHid'), pr = $('#pRun');
+  // 名字 + 备注(textContent:备注是用户输入的,不能当 HTML)
+  if (s.name) {
+    $('#bName').textContent = s.name + (s.remark ? `(${s.remark})` : '')
+        + (s.remarkPending ? ' · 备注待同步' : '');
+    const ri = $('#remarkIn');
+    if (document.activeElement !== ri && !ri.dataset.touched) ri.value = s.remark || '';
+  }
   pn.textContent = s.mode + ' · ' + s.ip;
   pn.className = 'pill ' + (s.mode === 'STA' ? 'ok' : 'warn');
   ph.textContent = s.hid ? 'HID 就绪' : 'HID 未连接';
@@ -302,6 +316,17 @@ async function loadAll() {
   `;
 
   if (scripts.length !== s.scriptCount) await loadScripts();
+}
+
+// 改备注:板子先问服务器查重,服务器连不上就先存板子上、下次心跳同步
+async function remarkSet() {
+  const ri = $('#remarkIn'), tip = $('#remarkTip');
+  tip.textContent = '保存中…';
+  const d = await api('/api/remark?remark=' + encodeURIComponent(ri.value.trim()), { method: 'POST' });
+  tip.textContent = d.ok ? (d.message || '已保存') : ('❌ ' + (d.message || '保存失败'));
+  tip.style.color = d.ok ? (d.pending ? 'var(--warn)' : 'var(--ok)') : 'var(--err)';
+  ri.dataset.touched = '';
+  loadAll();
 }
 
 // 蓝牙连接诊断:/api/ble?op=info 只在 POST 上,单独拉一次

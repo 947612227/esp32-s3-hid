@@ -327,7 +327,11 @@ public class Server {
     }
 
     /** 中继成功后回调(用来处理服务器捎回来的板子命令) */
-    public interface RelayCb { void done(String ledJson); }
+    /**
+     * @param ledJson 服务器捎回来的灯命令(没有 = null)
+     * @param remark  服务器那份板子备注(老服务端不带 = null)
+     */
+    public interface RelayCb { void done(String ledJson, String remark); }
 
     public static void relayBoard(Context ctx, String boardMac, String boardName,
                                   String statusJson, String flowNames, String flowTexts) {
@@ -359,16 +363,36 @@ public class Server {
             req("/api/v1/app/board-relay", "POST", o.toString(), new Cb() {
                 @Override public void done(boolean ok, String body) {
                     if (cb == null) return;
-                    String led = null;
+                    String led = null, remark = null;
                     try {
                         JSONObject r = new JSONObject(body == null ? "{}" : body);
                         JSONObject l = r.optJSONObject("led");
                         if (l != null) led = l.toString();
+                        if (ok && r.has("remark")) remark = r.optString("remark", "");
                     } catch (Throwable ignored) {}
-                    cb.done(led);
+                    cb.done(led, remark);
                 }
             });
         } catch (Throwable ignored) {}
+    }
+
+    /**
+     * 改板子备注 —— **以服务器为准**:服务器查重(不能和别的板子重名)后才算数。
+     * 成功后由调用方把服务器返回的 remark 下发给板子(板子不在身边就等它心跳自己同步)。
+     *
+     * @param cb ok=true:body 是 {"ok":true,"remark":"...","message":"..."};
+     *           ok=false:重名 / 不合法 / 连不上,body 里有 message(或异常信息)
+     */
+    public static void setBoardRemark(Context ctx, String boardMac, String remark, Cb cb) {
+        try {
+            JSONObject o = new JSONObject();
+            o.put("boardMac", boardMac);
+            o.put("remark", remark == null ? "" : remark);
+            o.put("deviceId", deviceId(ctx));
+            req("/api/v1/app/board-remark", "POST", o.toString(), cb);
+        } catch (Throwable e) {
+            if (cb != null) cb.done(false, String.valueOf(e.getMessage()));
+        }
     }
 
     // ---------------------------------------------------------------- 启动时统一处理

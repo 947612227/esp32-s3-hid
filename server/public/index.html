@@ -236,7 +236,14 @@
             <tr v-for="b in boards" :key="b.mac">
               <td><input type="checkbox" v-model="sel[b.mac]"></td>
               <td><span class="pill" :class="b.online?'on':'off'">{{ b.online?'在线':'离线' }}</span></td>
-              <td><b>{{ b.name || '(未命名)' }}</b><br><span class="tag">{{ b.mac }}</span></td>
+              <td><b>{{ b.name || '(未命名)' }}</b>
+                <template v-if="b.remark"><br><b style="color:var(--acc)">{{ b.remark }}</b></template>
+                <a href="javascript:;" class="tag" title="改备注" @click="editRemark(b)"> ✏️{{ b.remark ? '' : '备注' }}</a>
+                <template v-if="b.remarkConflict">
+                  <br><span class="st-warn tag" :title="'板子上改的,' + ago(b.remarkConflict.at) + '报上来'">
+                    ⚠ 板子上改的「{{ b.remarkConflict.remark }}」没采用(重名或不合法)</span>
+                </template>
+                <br><span class="tag">{{ b.mac }}</span></td>
               <td>{{ (b.wifi && b.wifi.ssid) || '—' }}
                 <template v-if="b.wifi && b.wifi.rssi">
                   <br><span class="tag">{{ b.wifi.rssi }} dBm · 信道 {{ b.wifi.channel || '?' }}</span>
@@ -650,7 +657,7 @@
           <tbody>
             <tr v-if="!stats.length"><td colspan="5" class="muted">还没有成功记录</td></tr>
             <tr v-for="(s,i) in stats" :key="i">
-              <td>{{ s.name || '(未知板子)' }}</td>
+              <td>{{ boardLabel(s.board_name || s.name, s.board_remark) || '(未知板子)' }}</td>
               <td><span class="tag">{{ s.mac }}</span></td>
               <td>{{ s.flow || '—' }}</td>
               <td><b>{{ s.count }}</b></td>
@@ -673,7 +680,7 @@
             <tr v-if="!events.length"><td colspan="4" class="muted">(还没有事件)</td></tr>
             <tr v-for="(e,i) in events" :key="i">
               <td>{{ fmtTime(e.at) }}</td>
-              <td>{{ e.board_name || e.mac }}</td>
+              <td>{{ boardLabel(e.board_name, e.board_remark) || e.mac }}</td>
               <td>{{ e.flow || '—' }}</td>
               <td><b>{{ e.message || '' }}</b></td>
             </tr>
@@ -718,6 +725,10 @@
       <h3>📋 {{ dlg.mac }}</h3>
       <div class="kv" v-if="dlg.board">
         <b>名字</b><span>{{ dlg.board.name || '(未命名)' }}</span>
+        <b>备注</b><span>{{ dlg.board.remark || '(没起)' }}
+          <a href="javascript:;" @click="editRemark(dlg.board)">✏️ 改</a>
+          <template v-if="dlg.board.remarkConflict"><br><span class="tag st-warn">
+            ⚠ 板子上改的「{{ dlg.board.remarkConflict.remark }}」没采用(重名或不合法)· {{ ago(dlg.board.remarkConflict.at) }}</span></template></span>
         <b>状态</b><span>{{ dlg.board.online ? '🟢 在线' : '🔴 离线' }}</span>
         <b>IP</b><span>{{ dlg.board.ip || '—' }}</span>
         <b>固件</b><span>{{ dlg.board.fw || '—' }} ({{ dlg.board.channel || 'stable' }})</span>

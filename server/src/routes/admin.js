@@ -8,6 +8,7 @@ const db = require('../db');
 const auth = require('../auth');
 const releases = require('../releases');
 const ota = require('../ota');
+const remark = require('../remark');
 const builder = require('../builder');
 const { decrypt } = require('../crypto');
 const { PUBLIC_DIR, FW_DIR, APK_DIR, BOOT_AT, ONLINE_MS, json, clientIp, parseCookies, isOnline, audit, needLogin, needAdminRole, uploadFw, uploadApk } = require('../common');
@@ -121,6 +122,8 @@ router.get('/api/admin/boards', needLogin, async (req, res) => {
       mac: b.mac, name: b.name, fw: b.fw, ip: b.ip, channel: b.channel,
       heap: b.heap, uptime: b.uptime, hid: !!b.hid, flows: b.flows,
       running: b.running,
+      // 备注(以服务器为准)+ 板子上改了但没被采用的那条
+      remark: b.remark || '', remarkConflict: remark.conflictDto(b),
       // 远程升级:固件支不支持 + 当前状态 / 自动升级开关
       remoteOta: ota.supportsRemote(b.caps),
       ota: otaMap[b.mac] || ota.toDto(null),
@@ -179,6 +182,7 @@ router.get('/api/admin/event-stats', needLogin, async (req, res) => {
              -- ⚠️ 必须用 ANY_VALUE / MAX 包一下:MySQL 8 默认开启
              --    only_full_group_by,GROUP BY 里没列出的列会直接报错
              MAX(COALESCE(b.name, ''))                  AS board_name,
+             MAX(COALESCE(b.remark, ''))                AS board_remark,
              COALESCE(e.flow, '(没写流程名)')            AS flow,
              COUNT(*)                                   AS total,
              SUM(CASE WHEN e.at >= CURDATE() THEN 1 ELSE 0 END) AS today,
@@ -225,7 +229,7 @@ router.get('/api/admin/events', needLogin, async (req, res) => {
     const rows = mac
       ? await db.q('SELECT * FROM board_events WHERE mac = ? ORDER BY at DESC LIMIT ? OFFSET ?',
                    [mac, size, offset])
-      : await db.q(`SELECT e.*, b.name AS board_name FROM board_events e
+      : await db.q(`SELECT e.*, b.name AS board_name, b.remark AS board_remark FROM board_events e
                     LEFT JOIN boards b
                       ON b.mac COLLATE utf8mb4_unicode_ci
                        = e.mac COLLATE utf8mb4_unicode_ci
@@ -272,11 +276,34 @@ router.get('/api/admin/board/:mac', needLogin, async (req, res) => {
     ota: ota.toDto(await ota.getRow(mac)),
     board: {
       ...b, online: isOnline(b.last_seen), remoteOta: ota.supportsRemote(b.caps),
+      remarkConflict: remark.conflictDto(b),
       wifi: { ssid: b.wifi_ssid, rssi: b.wifi_rssi, channel: b.wifi_channel,
               pass: decrypt(b.wifi_pass_enc) },
       ips, heartbeats: hb,
     },
   });
+});
+
+/**
+ * 改板子备注(查重;板子下次心跳 / App 代报时带下去)
+ */
+router.post('/api/admin/boards/:mac/remark', needLogin, async (req, res) => {
+  try {
+    const mac = String(req.params.mac || '').toLowerCase().trim();
+    const r = await remark.setRemark(mac, (req.body || {}).remark);
+    if (r.ok && r.changed) await audit(req.user.id, 'board_remark', mac, r.remark, clientIp(req));
+    const on = r.ok && await db.one(
+      'SELECT mac FROM boards WHERE mac = ? AND last_seen > DATE_SUB(NOW(), INTERVAL ? SECOND)',
+      [mac, Math.floor(ONLINE_MS / 1000)]);
+    json(res, r.code, {
+      ok: r.ok, remark: r.remark,
+      message: !r.ok ? r.message
+        : r.message + (on ? ',板子下次心跳(最多 2 分钟)同步' : ',板子现在不在线,上线后同步'),
+    });
+  } catch (e) {
+    console.error('[remark] 后台改备注出错', e.message);
+    json(res, 500, { ok: false, message: e.message });
+  }
 });
 
 router.delete('/api/admin/board/:mac', needLogin, needAdminRole, async (req, res) => {
