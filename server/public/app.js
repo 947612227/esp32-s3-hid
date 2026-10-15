@@ -635,7 +635,8 @@
             },
           });
           usb.result = `✅ 刷好了:${plan.version}` + (r.mac ? `(MAC ${r.mac})` : '')
-            + (erase ? '。新板子需要用 App 配 WiFi 后才会出现在控制中心。' : '。板子重启后会照常连 WiFi 来心跳。');
+            + (erase ? '。板子会先连固件里默认的 WiFi,连不上就开热点等 App 配网;来心跳后出现在控制中心。'
+                     : '。板子重启后会照常连 WiFi 来心跳。');
           usbLog(usb.result);
         } catch (e) {
           usb.result = '❌ 失败:' + (e && e.message || e);
