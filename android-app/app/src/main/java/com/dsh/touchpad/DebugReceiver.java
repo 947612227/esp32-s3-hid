@@ -17,6 +17,7 @@ import org.json.JSONObject;
  *       --es op status -n com.dsh.touchpad/.DebugReceiver
  *
  * 支持的 op:status / scripts / logs / logs:clear(读→清→读)/ schedstop:null / control:home / gesture:tap
+ *           schedtest(--es name 流程名 --el ms 延时)/ schedclear(--es name 流程名):定时精度自测
  */
 public class DebugReceiver extends BroadcastReceiver {
 
@@ -70,6 +71,16 @@ public class DebugReceiver extends BroadcastReceiver {
                     });
                 }
             });
+        } else if ("schedtest".equals(op) || "schedclear".equals(op)) {
+            // 定时精度自测:--es name 流程名 [--el ms 延时毫秒]
+            String name = it.getStringExtra("name");
+            if (name == null || MainActivity.CURRENT == null) {
+                Log.i(TAG, "RESULT ok=false body=缺 name 或主界面没起来");
+            } else if ("schedtest".equals(op)) {
+                MainActivity.CURRENT.debugSchedTest(name, it.getLongExtra("ms", 8000));
+            } else {
+                MainActivity.CURRENT.debugSchedClear(name);
+            }
         } else if ("schedstop:null".equals(op)) {
             // 不带回调发请求(界面里"停止脚本"就是这么调的),验证请求照样发出去
             b.scheduleStop(null);

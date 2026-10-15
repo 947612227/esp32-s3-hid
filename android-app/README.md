@@ -80,6 +80,12 @@ adb shell am broadcast -a com.dsh.touchpad.DEBUG --es op scripts  -n com.dsh.tou
 adb shell am broadcast -a com.dsh.touchpad.DEBUG --es op logs     -n com.dsh.touchpad/.DebugReceiver
 adb shell am broadcast -a com.dsh.touchpad.DEBUG --es op control:home -n com.dsh.touchpad/.DebugReceiver
 adb shell am broadcast -a com.dsh.touchpad.DEBUG --es op gesture:tap  -n com.dsh.touchpad/.DebugReceiver
+
+# 定时精度自测:给板子上已有的流程设一个 6 秒后的倒计时(不启动任何 App、不挤掉已开启的定时),
+# 到点后 logcat 里有「定时触发: 名字 (第 1 次,晚了 X ms)」;测完用 schedclear 清掉
+adb shell am broadcast -a com.dsh.touchpad.DEBUG --es op schedtest --es name 流程名 --el ms 6000 -n com.dsh.touchpad/.DebugReceiver
+adb shell am broadcast -a com.dsh.touchpad.DEBUG --es op schedclear --es name 流程名 -n com.dsh.touchpad/.DebugReceiver
+# 整套自动测试(自己建/删测试流程,不点屏幕):bash tests/app/test_sched_precise.sh
 ```
 
 还可以临时指定别的地址(不用改设置):

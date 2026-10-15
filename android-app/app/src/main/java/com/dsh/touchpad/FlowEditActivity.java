@@ -712,7 +712,7 @@ public class FlowEditActivity extends Activity {
                 draft.startAtMillis = 0;
             } else if (draft.schedMode == FlowStore.MODE_DELAY) {
                 draft.delayMs = data.getLongExtra(ScheduleActivity.EX_DELAY, 0);
-                draft.startAtMillis = System.currentTimeMillis();
+                draft.startAtMillis = MainActivity.netNowMs();   // 网络时间,和调度器同一把尺
             } else {
                 draft.atMillis = 0; draft.delayMs = 0; draft.startAtMillis = 0;
             }

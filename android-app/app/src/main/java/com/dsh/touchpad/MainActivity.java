@@ -1184,9 +1184,15 @@ public class MainActivity extends Activity {
     /** 读列表失败/读回空时的重试次数 */
     private int scriptsRetry = 0;
 
-    /** 真正发请求读流程列表 */
+    /**
+     * 真正发请求读流程列表。
+     *
+     * ⚠️ 没打开过「流程」页(scriptListBox == null)也要读 ——
+     *    定时调度靠这里填的 nameToIndex 找板子序号。以前一进来就 return,
+     *    App 重启后没点开「流程」页的话,到点直接报"找不到流程",根本不执行。
+     *    界面相关的部分各自判空(renderScripts 本身也判空)。
+     */
     private void fetchScripts() {
-        if (scriptListBox == null) return;
         board.scripts(new Board.Cb() {
             @Override public void done(boolean ok, String body) {
                 if (!ok) {
@@ -1207,7 +1213,7 @@ public class MainActivity extends Activity {
                         return;
                     }
                     scriptsRetry = 0;
-                    if (scriptListBox.getChildCount() == 0) {
+                    if (scriptListBox != null && scriptListBox.getChildCount() == 0) {
                         scriptListBox.addView(hint("读取失败:" + body));
                     }
                     return;
@@ -1217,8 +1223,10 @@ public class MainActivity extends Activity {
                     scripts = o.optJSONArray("scripts");
                     if (scripts == null) scripts = new JSONArray();
                 } catch (Exception e) {
-                    scriptListBox.removeAllViews();
-                    scriptListBox.addView(hint("解析失败: " + e.getMessage()));
+                    if (scriptListBox != null) {
+                        scriptListBox.removeAllViews();
+                        scriptListBox.addView(hint("解析失败: " + e.getMessage()));
+                    }
                     return;
                 }
                 // 只在数据真的变了才重绘,避免按钮位置跳动
@@ -1530,7 +1538,9 @@ public class MainActivity extends Activity {
             m.appLaunched = false;
             m.fired = false;
             if (m.schedMode == FlowStore.MODE_DELAY) {
-                m.startAtMillis = System.currentTimeMillis();   // 倒计时从现在重新算
+                // 倒计时从现在重新算。⚠️ 必须用网络时间:调度器拿 time.nowMs() 比,
+                // 用本机时间的话手机时钟偏多少,倒计时就早/晚多少
+                m.startAtMillis = time.nowMs();
             }
             flows.put(m);
             if (displaced != null) toast("已开启:" + name + "(已自动暂停「" + displaced + "」)");
@@ -1890,7 +1900,7 @@ public class MainActivity extends Activity {
                 m.startAtMillis = 0;
             } else if (m.schedMode == FlowStore.MODE_DELAY) {
                 m.delayMs = data.getLongExtra(ScheduleActivity.EX_DELAY, 0);
-                m.startAtMillis = System.currentTimeMillis();
+                m.startAtMillis = time.nowMs();          // 网络时间,和调度器同一把尺
             } else {
                 m.atMillis = 0; m.delayMs = 0; m.startAtMillis = 0;
             }
@@ -2874,12 +2884,22 @@ public class MainActivity extends Activity {
         //    同时开了两个定时时,可能永远只调度其中一个,
         //    新设的那个到点根本不跑(用户实测:"设了一分钟后执行,到点没点按钮")。
         final long now = time.nowMs();
+        long nextTarget = Long.MAX_VALUE;     // 最近一个还没到点的目标时刻
         java.util.List<String> names = flows.enabledNames();
         for (String name : names) {
             FlowStore.Meta m = flows.get(name);
             if (m == null) continue;
             long target = m.targetMillis();
             if (target <= 0) continue;
+            if (!m.fired && target > now && target < nextTarget) nextTarget = target;
+
+            // 快到点了(10 秒内)还不知道它在板子上的序号 → 先读一次列表,别等到点再读
+            if (!m.fired && target > now && target - now <= 10_000
+                    && !nameToIndex.containsKey(name)
+                    && System.currentTimeMillis() - lastIdxPrefetchAt > 3000) {
+                lastIdxPrefetchAt = System.currentTimeMillis();
+                fetchScripts();
+            }
 
             boolean dirty = false;
 
@@ -2900,6 +2920,7 @@ public class MainActivity extends Activity {
                 m.appLaunched = true;
                 dirty = true;
                 toast("定时快到了,已启动「" + appLabelOf(pkg, m.appName) + "」");
+                warnIfPageOff(name);
             }
 
             // ② 到点执行
@@ -2920,25 +2941,158 @@ public class MainActivity extends Activity {
                         }
                     } catch (Throwable ignored) {}
                 }
+                int times = Math.max(1, m.repeatCount);
+                int gap = m.intervalMs > 0 ? m.intervalMs : 0;
                 Integer idx = nameToIndex.get(name);
                 if (idx != null) {
-                    int times = Math.max(1, m.repeatCount);
-                    int gap = m.intervalMs > 0 ? m.intervalMs : 0;
-                    toast("定时到,开始执行「" + name + "」");
-                    boardLog("定时触发: " + name + " (第 " + times + " 次)");
-                    // ⚠️ 必须走 exec() 而不是直接 board.run():
-                    //    exec() 会 setRunning(true) 盖上"执行中遮罩",把本 App 的按钮锁住。
-                    //    踩过的坑:定时执行没锁界面,流程的注入点击落在**我们自己的
-                    //    流程列表**上,把「删除」按钮点了一串 —— 5 个示例流程就是这样没的。
-                    exec(idx, times, gap);
+                    fireFlow(name, idx, times, gap, now - target);
                 } else {
-                    toast("找不到流程「" + name + "」,请到流程页刷新列表");
-                    boardLog("定时触发失败: 流程「" + name + "」不在板子列表里");
+                    // 序号表里没有(列表还没读过 / 板子刚改过)→ 当场读一次再跑,不直接放弃
+                    fireAfterList(name, times, gap, target);
                 }
             }
 
             if (dirty) flows.put(m);
         }
+
+        // ③ 精确到点:1 秒节拍最多会晚将近 1 秒才发现"到点了"(实测晚了 0.1~1 秒不等)。
+        //    最近的目标进入 1.5 秒内,就按毫秒单独排一次,到点那一刻再跑一遍调度。
+        if (nextTarget != Long.MAX_VALUE && nextTarget - now <= 1500) {
+            ui.removeCallbacks(exactFire);
+            ui.postDelayed(exactFire, Math.max(1, nextTarget - now));
+        }
+    }
+
+    /**
+     * 调试用(DebugReceiver 的 schedtest):给流程设一个 delayMs 后到点的倒计时。
+     * 直接置 enabled,**不走 enableOnly**,不会挤掉用户已开启的定时。
+     * 目标 App 用一个不存在的包名 ⇒ 拿不到启动 Intent,到点什么都不拉起。
+     * ⚠️ 不能填本 App 自己:那样"提前启动目标 App"会新建第二个主界面实例,
+     *    它又跑一遍开机同步、又开一套调度节拍,测试结果全乱(实测踩过)。
+     */
+    void debugSchedTest(String name, long delayMs) {
+        FlowStore.Meta m = flows.get(name);
+        if (m == null) { m = new FlowStore.Meta(); m.name = name; }
+        m.schedMode = FlowStore.MODE_DELAY;
+        m.delayMs = delayMs;
+        m.startAtMillis = time.nowMs();
+        m.appPkg = "none.touchpad.selftest";
+        m.appName = "定时自测(不启动 App)";
+        m.enabled = true;
+        m.resetRunState();
+        flows.put(m);
+        // 板子上刚建的测试流程要进 nameToIndex。
+        // ⚠️ 流程列表有 1.5 秒短缓存,测试流程是绕过 App 直接写进板子的 ⇒ 过了缓存期再读一次
+        fetchScripts();
+        ui.postDelayed(new Runnable() {
+            @Override public void run() { fetchScripts(); }
+        }, 2000);
+        android.util.Log.i("TouchPad", "定时自测: 「" + name + "」将在 " + delayMs
+                + " ms 后到点,目标时刻 " + m.targetMillis());
+    }
+
+    /** 调试用:删掉 schedtest 留下的定时元信息 */
+    void debugSchedClear(String name) {
+        flows.remove(name);
+        fetchScripts();
+        android.util.Log.i("TouchPad", "定时自测: 已清掉「" + name + "」");
+    }
+
+    /** 上次为定时预读流程列表的时刻(本机时间,节流用) */
+    private long lastIdxPrefetchAt = 0;
+
+    /** 定时到点:发 RUN,再提示、写日志 */
+    private void fireFlow(String name, int idx, int times, int gap, long lateMs) {
+        // ⚠️ 必须走 exec() 而不是直接 board.run():
+        //    exec() 会 setRunning(true) 盖上"执行中遮罩",把本 App 的按钮锁住。
+        //    踩过的坑:定时执行没锁界面,流程的注入点击落在**我们自己的
+        //    流程列表**上,把「删除」按钮点了一串 —— 5 个示例流程就是这样没的。
+        // ⚠️ 先发 RUN,再弹提示、写日志:WiFi 模式下请求是串行的,
+        //    日志排在前面 RUN 就得等它一个来回。
+        exec(idx, times, gap);
+        toast("定时到,开始执行「" + name + "」");
+        boardLog("定时触发: " + name + " (第 " + times + " 次,晚了 " + lateMs + " ms)");
+        warnIfPageOff(name);
+    }
+
+    /** 序号表里没有这个流程:现读一次板子列表,找到就跑 */
+    private void fireAfterList(final String name, final int times, final int gap,
+                               final long target) {
+        board.scripts(new Board.Cb() {
+            @Override public void done(boolean ok, String body) {
+                int idx = -1;
+                if (ok) {
+                    try {
+                        JSONArray arr = new JSONObject(body).optJSONArray("scripts");
+                        for (int i = 0; arr != null && i < arr.length(); i++) {
+                            JSONObject so = arr.optJSONObject(i);
+                            if (so == null) continue;
+                            nameToIndex.put(Board.jstr(so, "name"), Board.jint(so, "index"));
+                            if (name.equals(Board.jstr(so, "name"))) idx = Board.jint(so, "index");
+                        }
+                    } catch (Throwable ignored) {}
+                }
+                if (idx >= 0) {
+                    fireFlow(name, idx, times, gap, time.nowMs() - target);
+                } else {
+                    toast("找不到流程「" + name + "」,请到流程页刷新列表");
+                    boardLog("定时触发失败: 流程「" + name + "」不在板子列表里"
+                            + (ok ? "" : "(读列表失败:" + body + ")"));
+                }
+            }
+        });
+    }
+
+    /** 精确到点用的单次任务(见 schedulerTick ③) */
+    private final Runnable exactFire = new Runnable() {
+        @Override public void run() { if (autoRefresh) schedulerTick(); }
+    };
+
+    /** 当前网络时间;MainActivity 还没起来时退回本机时间(给编辑页等其它页面用) */
+    static long netNowMs() {
+        MainActivity a = CURRENT;
+        if (a != null && a.time != null) return a.time.nowMs();
+        return System.currentTimeMillis();
+    }
+
+    /** 流程正文里有没有要靠页面识别的步骤(关键字同固件 script_parser:waitfor/wf/ifpage/if) */
+    static boolean textUsesPage(String text) {
+        if (text == null) return false;
+        for (String line : text.split("\n")) {
+            String s = line.trim();
+            if (s.isEmpty() || s.startsWith("#")) continue;
+            String cmd = s.split("\\s+", 2)[0];
+            if (cmd.equalsIgnoreCase("waitfor") || cmd.equalsIgnoreCase("wf")
+                    || cmd.equalsIgnoreCase("ifpage") || cmd.equalsIgnoreCase("if")) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 定时流程要用页面识别、但页面识别没开 → 大声提醒。
+     * 不开的话板子收不到页面,每个 waitfor 都要干等到超时才往下走
+     * (实测:「大麦_南京-肖战」第 2 步 waitfor 确认购买 5000,到点后白等 5 秒才点第一下)。
+     *
+     * ⚠️ 流程正文得单独 GET 一次:蓝牙的 LIST 只有名字和步数,没有步骤内容。
+     *    所以先看页面识别开没开(开着就什么都不发),到点时也是在 RUN 发出去之后才调。
+     */
+    private void warnIfPageOff(final String name) {
+        boolean on = false;
+        try { on = PageWatcher.enabled(); } catch (Throwable ignored) {}
+        if (on) return;
+        Integer idx = nameToIndex.get(name);
+        if (idx == null) return;
+        board.scriptText(idx, new Board.Cb() {
+            @Override public void done(boolean ok, String body) {
+                if (!ok) return;
+                String text = null;
+                try { text = new JSONObject(body).optString("text", null); } catch (Throwable ignored) {}
+                if (!textUsesPage(text)) return;
+                toast("⚠️「" + name + "」要用页面识别,但页面识别没开:"
+                        + "等待页面的步骤会干等到超时。请到「设置 → 页面识别」打开");
+                boardLog("⚠️ 页面识别没开,「" + name + "」里的 waitfor 会等到超时才继续");
+            }
+        });
     }
 
     /**
